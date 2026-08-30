@@ -1,14 +1,3 @@
-"""
-llm_client.py
---------------
-Thin wrapper around whichever LLM API the team picks (Anthropic, OpenAI, local, etc.)
-Its only job: call the model, return the text, and report token usage so it can be
-plugged straight into the `usage` field of the agent's API contract response.
-
-Swap out `_call_anthropic` for whatever provider you actually use — keep the
-call_llm() signature the same so reranker.py doesn't need to change.
-"""
-
 import json
 import os
 from dataclasses import dataclass
