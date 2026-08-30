@@ -30,6 +30,7 @@ class ConversationState:
 class StateTracker:
     """
     tracks session history, updates item constraints, checks for over-generalizations, and handles intent overrides.
+    Uses weighted slot scoring to handle missing prices and prioritize explicit attributes.
     """
     def __init__(self):
         # to consider adding more signals
@@ -39,6 +40,19 @@ class StateTracker:
         ]
         # Threshold for over-generality cutoff based on candidate pool size
         self.candidate_cutoff_threshold = 500
+        
+        # Slot weights: higher weight = stronger signal for specificity
+        # Explicit attributes weighted equally; price optional
+        self.slot_weights = {
+            "size": 0.5,           # explicit attribute in details
+            "color": 0.5,          # explicit attribute in details
+            "material": 0.5,       # explicit attribute in details
+            "store": 0.6,          # brand/store signal
+            "main_category": 0.3,  # category alone is weaker signal
+            "price_max": 0.5,      # price has equal weight when filled
+            "price_min": 0.5,      # price has equal weight when filled
+            "min_rating": 0.3      # rating is lower priority
+        }
 
     # determines if updated user message contains an intent override signal
     def is_intent_override(self, user_message: str) -> bool:
@@ -50,38 +64,67 @@ class StateTracker:
         """
         triggers an over-generality cutoff if:
         1. candidate pool overload (exceeds the cutoff threshold).
-        2. slot density is too low/only vague details are known (eg., only a high-level category is given).
+        2. weighted specificity score is too low (insufficient concrete constraints).
+        Price is treated as optional; absence does not penalize specificity.
         """
         # rule 1: candidate pool overload
         if candidate_count is not None and candidate_count > self.candidate_cutoff_threshold:
             return True
 
-        # rule 2: sparse slot check
-        has_specific_details = len(state.slots["details"]) > 0
-        has_brand_or_price = state.slots["store"] is not None or state.slots["price_max"] is not None
-        has_category_only = state.slots["main_category"] is not None and not (has_specific_details or has_brand_or_price)
-
-        if has_category_only or (not has_specific_details and not has_brand_or_price):
-            return True
-
-        return False
+        # rule 2: calculate weighted specificity score
+        specificity_score = 0.0
+        
+        # Score details (size, color, material)
+        for detail_key in ["size", "color", "material"]:
+            if detail_key in state.slots["details"] and state.slots["details"][detail_key] is not None:
+                specificity_score += self.slot_weights.get(detail_key, 0.0)
+        
+        # Score other slots (store, category, rating)
+        if state.slots["store"] is not None:
+            specificity_score += self.slot_weights["store"]
+        if state.slots["main_category"] is not None:
+            specificity_score += self.slot_weights["main_category"]
+        if state.slots["min_rating"] is not None:
+            specificity_score += self.slot_weights["min_rating"]
+        
+        # Score price slots (optional, equal weight when present)
+        if state.slots["price_max"] is not None:
+            specificity_score += self.slot_weights["price_max"]
+        if state.slots["price_min"] is not None:
+            specificity_score += self.slot_weights["price_min"]
+        
+        # Trigger over-generality if score is too low
+        # Minimum threshold: 0.5 (one explicit attribute) OR 0.3 (category + something)
+        is_too_generic = specificity_score < 0.5
+        
+        return is_too_generic
 
     # generates clarification prompt upon over-generality detection
     def generate_clarification_prompt(self, state: ConversationState) -> str:
+        """
+        Suggest missing attributes to narrow down results.
+        Price is only suggested if the user has already mentioned it in their query history.
+        """
         missing_attributes = []
-        if "size" not in state.slots["details"]:
+        
+        # Always consider explicit attributes first
+        if "size" not in state.slots["details"] or state.slots["details"].get("size") is None:
             missing_attributes.append("size")
-        if "color" not in state.slots["details"]:
+        if "color" not in state.slots["details"] or state.slots["details"].get("color") is None:
             missing_attributes.append("color")
         if state.slots["store"] is None:
-            missing_attributes.append("preferred brand/store")
-        if state.slots["price_max"] is None:
+            missing_attributes.append("brand")
+        
+        # Only suggest price range if user has mentioned price in the conversation
+        price_mentioned = any("price" in str(turn.get("content", "")).lower() for turn in state.history)
+        if price_mentioned and state.slots["price_max"] is None:
             missing_attributes.append("price range")
 
         category_name = state.slots["main_category"] or "items"
         
         if missing_attributes:
-            options_str = ", ".join(missing_attributes[:2])
+            # Suggest top 2-3 most relevant missing attributes
+            options_str = ", ".join(missing_attributes[:3])
             return f"I found many results for {category_name}! To help me narrow this down, could you specify your {options_str}?"
         
         return f"Could you provide a bit more detail on what kind of {category_name} you're looking for?"

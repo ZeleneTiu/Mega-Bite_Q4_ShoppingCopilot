@@ -22,6 +22,7 @@ class IntentRouter:
     """
     detects intent matching dataset metadata fields:
     (price, store, details, categories, average_rating)
+    Uses weighted scoring to handle missing prices and prioritize explicit constraints.
     """
     def __init__(self):
         # high constraint pattern = higher confidence of BUYING intent
@@ -33,6 +34,18 @@ class IntentRouter:
             "color": r"\b(black|white|red|blue|green|yellow|pink|purple|brown|navy|gold|silver)\b",
             "main_category": r"\b(clothing|shoes|jewelry|watches|handbags|boots|sneakers|dresses)\b",
             "min_rating": r"\b(\d(?:\.\d)?)\s*(?:stars?|rated|rating)\b"
+        }
+
+        # Constraint weights: higher weight = stronger signal for BUYING intent
+        # Explicit constraints (specific attributes) weighted higher than price
+        self.constraint_weights = {
+            "size": 0.5,           # explicit attribute
+            "color": 0.5,          # explicit attribute
+            "store": 0.6,          # explicit brand/store signal
+            "main_category": 0.3,  # category alone is weaker signal
+            "price_max": 0.5,      # price has equal weight when mentioned
+            "price_min": 0.5,      # price has equal weight when mentioned
+            "min_rating": 0.3      # rating is lower priority
         }
 
         # high prevalence of browsing keywords = higher confidence of BROWSING intent
@@ -56,16 +69,45 @@ class IntentRouter:
                 else:
                     detected_constraints[constraint_type] = match.group(1) if match.lastindex else match.group(0)
 
-        has_hard_constraints = len(detected_constraints) > 0
         has_browsing_keywords = any(kw in message_lower for kw in self.browsing_keywords)
 
-        # high constraint density triggers high-precision BUYING track
-        if has_hard_constraints and not (has_browsing_keywords and len(detected_constraints) == 1):
+        # Calculate weighted constraint score (regardless of price availability in dataset)
+        constraint_score = sum(
+            self.constraint_weights.get(constraint_type, 0.0)
+            for constraint_type in detected_constraints.keys()
+        )
+        
+        # Count explicit constraints (non-price, non-category attributes)
+        explicit_constraints = [
+            c for c in detected_constraints.keys() 
+            if c in ("size", "color", "store")
+        ]
+        has_explicit_constraints = len(explicit_constraints) > 0
+
+        # Determine intent and confidence based on weighted score
+        # If user has explicit attributes (size, color, brand) OR
+        # has price constraints AND not purely browsing keywords -> BUYING
+        if has_explicit_constraints or (constraint_score >= 0.7 and not has_browsing_keywords):
             track = IntentTrack.BUYING
-            confidence = 0.9 if len(detected_constraints) > 1 else 0.75
-        else:
+            # Higher confidence for multiple explicit constraints
+            if len(explicit_constraints) >= 2:
+                confidence = 0.95
+            elif has_explicit_constraints:
+                confidence = 0.85
+            else:
+                confidence = 0.75
+        elif has_browsing_keywords and constraint_score < 0.4:
+            # Clear browsing intent with minimal specific constraints
             track = IntentTrack.BROWSING
-            confidence = 0.85 if has_browsing_keywords else 0.60
+            confidence = 0.85
+        elif constraint_score >= 0.4:
+            # Some constraints detected but mixed signals
+            track = IntentTrack.BUYING
+            confidence = 0.70
+        else:
+            # No clear constraints, default to browsing
+            track = IntentTrack.BROWSING
+            confidence = 0.60
 
         return IntentResult(
             track=track,
