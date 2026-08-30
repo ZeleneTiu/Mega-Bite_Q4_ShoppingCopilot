@@ -145,9 +145,13 @@ class Agent:
         # Check if query is over-generalized
         if self.state_tracker.check_over_generality(state, candidate_count):
             clarification_prompt = self.state_tracker.generate_clarification_prompt(state)
+            missing_attributes = self.state_tracker._get_prioritized_missing_attributes(state)
+            ask_attribute = missing_attributes[0] if missing_attributes else "other"
+            if ask_attribute == "price range":
+                ask_attribute = "budget"
             return {
                 "message": clarification_prompt,
-                "ask_attribute": "specificity",
+                "ask_attribute": ask_attribute,
                 "recommendations": [],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0},
             }
