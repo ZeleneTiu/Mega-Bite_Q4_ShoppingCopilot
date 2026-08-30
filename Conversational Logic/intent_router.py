@@ -22,7 +22,7 @@ class IntentRouter:
     """
     detects intent matching dataset metadata fields:
     (price, store, details, categories, average_rating)
-    Uses weighted scoring to handle missing prices and prioritize explicit constraints.
+    Uses weighted scoring with dynamic prioritization to minimize clarification turns.
     """
     def __init__(self):
         # high constraint pattern = higher confidence of BUYING intent
@@ -36,9 +36,8 @@ class IntentRouter:
             "min_rating": r"\b(\d(?:\.\d)?)\s*(?:stars?|rated|rating)\b"
         }
 
-        # Constraint weights: higher weight = stronger signal for BUYING intent
-        # Explicit constraints (specific attributes) weighted higher than price
-        self.constraint_weights = {
+        # Base constraint weights: used as foundation for dynamic weighting
+        self.base_constraint_weights = {
             "size": 0.5,           # explicit attribute
             "color": 0.5,          # explicit attribute
             "store": 0.6,          # explicit brand/store signal
@@ -54,9 +53,43 @@ class IntentRouter:
             "style", "outfit", "casual", "formal", "suggestions", "what goes with", "trending"
         ]
 
-    def route(self, user_message: str) -> IntentResult:
+    def get_dynamic_weights(self, already_filled_attributes: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Calculate dynamic weights based on already-filled attributes.
+        Prioritizes attributes that are most discriminative given current state.
+        """
+        weights = self.base_constraint_weights.copy()
+        
+        # If category is already filled, prioritize specific attributes more
+        if "main_category" in already_filled_attributes and already_filled_attributes["main_category"]:
+            # Specific attributes become more valuable when we know category
+            weights["size"] = 0.7      # boost from 0.5
+            weights["color"] = 0.7    # boost from 0.5
+            weights["store"] = 0.7    # boost from 0.6
+            weights["main_category"] = 0.1  # reduce importance
+        
+        # If brand/store is filled, prioritize specific details
+        if "store" in already_filled_attributes and already_filled_attributes["store"]:
+            weights["size"] = 0.8      # very important to narrow down
+            weights["color"] = 0.8    # very important
+            weights["store"] = 0.2    # already filled, reduce
+        
+        # If multiple attributes filled, price becomes more important for final narrowing
+        filled_count = sum(1 for v in already_filled_attributes.values() if v)
+        if filled_count >= 2:
+            weights["price_max"] = 0.7  # boost price priority
+            weights["price_min"] = 0.7
+        
+        return weights
+
+    def route(self, user_message: str, already_filled_attributes: Dict[str, Any] = None) -> IntentResult:
         message_lower = user_message.lower()
         detected_constraints: Dict[str, Any] = {}
+        
+        # Use dynamic weights based on current state
+        if already_filled_attributes is None:
+            already_filled_attributes = {}
+        constraint_weights = self.get_dynamic_weights(already_filled_attributes)
         
         # regex extraction
         for constraint_type, pattern in self.constraint_patterns.items():
@@ -71,9 +104,9 @@ class IntentRouter:
 
         has_browsing_keywords = any(kw in message_lower for kw in self.browsing_keywords)
 
-        # Calculate weighted constraint score (regardless of price availability in dataset)
+        # Calculate weighted constraint score using dynamic weights
         constraint_score = sum(
-            self.constraint_weights.get(constraint_type, 0.0)
+            constraint_weights.get(constraint_type, 0.0)
             for constraint_type in detected_constraints.keys()
         )
         

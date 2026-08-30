@@ -64,70 +64,115 @@ class StateTracker:
         """
         triggers an over-generality cutoff if:
         1. candidate pool overload (exceeds the cutoff threshold).
-        2. weighted specificity score is too low (insufficient concrete constraints).
+        2. dynamic weighted specificity score is too low (insufficient concrete constraints).
         Price is treated as optional; absence does not penalize specificity.
         """
         # rule 1: candidate pool overload
         if candidate_count is not None and candidate_count > self.candidate_cutoff_threshold:
             return True
 
-        # rule 2: calculate weighted specificity score
-        specificity_score = 0.0
-        
-        # Score details (size, color, material)
-        for detail_key in ["size", "color", "material"]:
-            if detail_key in state.slots["details"] and state.slots["details"][detail_key] is not None:
-                specificity_score += self.slot_weights.get(detail_key, 0.0)
-        
-        # Score other slots (store, category, rating)
-        if state.slots["store"] is not None:
-            specificity_score += self.slot_weights["store"]
-        if state.slots["main_category"] is not None:
-            specificity_score += self.slot_weights["main_category"]
-        if state.slots["min_rating"] is not None:
-            specificity_score += self.slot_weights["min_rating"]
-        
-        # Score price slots (optional, equal weight when present)
-        if state.slots["price_max"] is not None:
-            specificity_score += self.slot_weights["price_max"]
-        if state.slots["price_min"] is not None:
-            specificity_score += self.slot_weights["price_min"]
+        # rule 2: calculate dynamic weighted specificity score based on filled slots
+        specificity_score = self._calculate_dynamic_specificity_score(state)
         
         # Trigger over-generality if score is too low
         # Minimum threshold: 0.5 (one explicit attribute) OR 0.3 (category + something)
         is_too_generic = specificity_score < 0.5
         
         return is_too_generic
+    
+    def _calculate_dynamic_specificity_score(self, state: ConversationState) -> float:
+        """
+        Calculate specificity score with dynamic weighting.
+        Weights adjust based on what's already filled to prioritize most discriminative attributes.
+        """
+        specificity_score = 0.0
+        
+        # Determine what's filled
+        has_category = state.slots["main_category"] is not None
+        has_store = state.slots["store"] is not None
+        has_size = "size" in state.slots["details"] and state.slots["details"]["size"] is not None
+        has_color = "color" in state.slots["details"] and state.slots["details"].get("color") is not None
+        has_price = state.slots["price_max"] is not None or state.slots["price_min"] is not None
+        
+        # Dynamic weighting based on state
+        # If category is missing, it's critical; heavily penalize
+        if not has_category:
+            return 0.0
+        
+        # Category established: base score
+        specificity_score = 0.3
+        
+        # Store/brand is highly discriminative
+        if has_store:
+            specificity_score += 0.3
+        
+        # Details (size, color) are very valuable when category + store known
+        if has_size:
+            specificity_score += 0.2
+        if has_color:
+            specificity_score += 0.2
+        
+        # Price adds minimal value unless already have category + store
+        if has_price and (has_size or has_color or has_store):
+            specificity_score += 0.1
+        
+        return specificity_score
 
     # generates clarification prompt upon over-generality detection
     def generate_clarification_prompt(self, state: ConversationState) -> str:
         """
         Suggest missing attributes to narrow down results.
+        Uses dynamic prioritization and caps at 2 attributes max.
         Price is only suggested if the user has already mentioned it in their query history.
         """
-        missing_attributes = []
-        
-        # Always consider explicit attributes first
-        if "size" not in state.slots["details"] or state.slots["details"].get("size") is None:
-            missing_attributes.append("size")
-        if "color" not in state.slots["details"] or state.slots["details"].get("color") is None:
-            missing_attributes.append("color")
-        if state.slots["store"] is None:
-            missing_attributes.append("brand")
-        
-        # Only suggest price range if user has mentioned price in the conversation
-        price_mentioned = any("price" in str(turn.get("content", "")).lower() for turn in state.history)
-        if price_mentioned and state.slots["price_max"] is None:
-            missing_attributes.append("price range")
-
+        missing_attributes = self._get_prioritized_missing_attributes(state)
         category_name = state.slots["main_category"] or "items"
         
         if missing_attributes:
-            # Suggest top 2-3 most relevant missing attributes
-            options_str = ", ".join(missing_attributes[:3])
+            # Cap at 2 attributes to avoid overwhelming the user
+            options_str = ", ".join(missing_attributes[:2])
             return f"I found many results for {category_name}! To help me narrow this down, could you specify your {options_str}?"
         
         return f"Could you provide a bit more detail on what kind of {category_name} you're looking for?"
+    
+    def _get_prioritized_missing_attributes(self, state: ConversationState) -> List[str]:
+        """
+        Get missing attributes sorted by priority based on what's already filled.
+        Prioritizes attributes that are most discriminative given current state.
+        """
+        missing_attributes = []
+        
+        # Build priority list based on filled slots
+        has_category = state.slots["main_category"] is not None
+        has_store = state.slots["store"] is not None
+        has_size = "size" in state.slots["details"] and state.slots["details"].get("size") is not None
+        has_color = "color" in state.slots["details"] and state.slots["details"].get("color") is not None
+        has_price = state.slots["price_max"] is not None or state.slots["price_min"] is not None
+        
+        filled_count = sum([has_category, has_store, has_size, has_color, has_price])
+        
+        # Dynamic prioritization: ask for most discriminative attributes first
+        if not has_category:
+            # Category is the foundation, ask first if missing
+            missing_attributes.append("category")
+        elif not has_store:
+            # Once category known, brand/store is highly discriminative
+            missing_attributes.append("brand")
+        elif not has_size and not has_color:
+            # With category + store, size and color are most discriminative
+            missing_attributes.append("size")
+            missing_attributes.append("color")
+        elif not has_size:
+            missing_attributes.append("size")
+        elif not has_color:
+            missing_attributes.append("color")
+        
+        # Only suggest price if user has mentioned it before
+        price_mentioned = any("price" in str(turn.get("content", "")).lower() for turn in state.history)
+        if price_mentioned and not has_price:
+            missing_attributes.append("price range")
+        
+        return missing_attributes
 
     # updates state based on output from is_intent_override and new constraints detected by intent_router
     def update_state(self, state: ConversationState, user_message: str, new_constraints: Dict[str, Any], intent_track: str) -> ConversationState:

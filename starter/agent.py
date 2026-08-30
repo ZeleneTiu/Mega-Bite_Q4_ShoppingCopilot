@@ -117,8 +117,8 @@ class Agent:
         
         state = self._session_states[session_id]
         
-        # Step 1: Detect intent from user message
-        intent_result: IntentResult = self.intent_router.route(user_message)
+        # Step 1: Detect intent from user message with dynamic weighting based on filled slots
+        intent_result: IntentResult = self.intent_router.route(user_message, state.slots)
         
         # Step 2: Update conversation state with constraints and intent
         state = self.state_tracker.update_state(
