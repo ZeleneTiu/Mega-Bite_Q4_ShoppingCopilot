@@ -1,0 +1,283 @@
+Log — Anna's work (Retrieval & In-Memory Search Engine Lead)
+
+Tasks:
+
+B1 - Parse the frozen 50,000 Amazon product catalog, extract schema fields (parent_asin, title, store, categories, price, details).
+
+B2 - Upgrade the starter BM25 agent by building a dual-index (BM25 keyword + FAISS/dense vector semantic search), running fully in-memory.
+
+B3 - Implement Reciprocal Rank Fusion (RRF) to combine keyword, category metadata, and vector similarity rankings into one score.
+
+B4 - Apply dynamic candidate pool truncation and slot decay over time to keep latency low and avoid out-of-memory crashes.
+
+B5 - Optimize Hit Rate@10 across the development session benchmark.
+
+Progress:
+- Created branch ANNA, pushed to origin.
+- Set up ANNA_dump folder for scratch files and this log.
+- Cherry-picked requirements.txt update from origin/main (commit dc0a1c3) without merging.
+- Downloaded and verified catalog.jsonl.gz (checksum match), extracted to data/catalog.jsonl (50,000 rows).
+- Checked field completeness: price null on 78.9% of items, details empty on 3.3%, categories 0 empty, title 2 empty. Catalog is otherwise clean/consistent.
+
+Exec decisions:
+- Missing price handling (B1): treated as unknown, not disqualifying. No item excluded for lacking price; nulls score neutral rather than zero.
+- Workaround: derive category price bands from the ~21% of items with real prices, using percentiles at the deepest category level with enough items, falling back up the category hierarchy when a level is too sparse. An unpriced item is scored on how much its category band overlaps the user's stated budget, discounted by a confidence factor since a band is weaker signal than a real price. Items with real prices keep full weight; band-only items get partial weight; items with neither stay neutral. Bands are internal ranking data only, never shown to the user as a price.
+- Bound: price acts as a modifier on the fused RRF score (B3), capped narrowly so it can reorder near-ties but never overturn a strong relevance match. Same approach generalises to other sparse fields (e.g. size, colour) filled by A2.
+
+--- Session 2: option 1 built (category-scoped lexical retrieval) ---
+
+Shipped (src/retrieval/):
+- text.py     shared tokeniser/normaliser so every index agrees on what a token is.
+- catalog.py  B1. Loads 50k docs in 2.4s, 143MB. Integer doc ids, price as NaN not zero.
+- category.py Category scoping. Two-tier: tight primary pool + wider fallback tail.
+- lexical.py  B2 keyword half. Hand-rolled field-weighted BM25 in numpy, no sqlite,
+              no external search dep. 5.4s build, 101k vocab, 6ms full-catalog query.
+- engine.py   Ranking + thin turn state. BM25 + rarity-weighted phrase evidence.
+Harness in ANNA_dump/ (eval_agent.py, run_eval.py) so starter/agent.py stays D's file.
+
+RESULT vs docs/baseline_results.json (200 public sessions):
+                baseline      ours     delta
+  hit_rate@10     0.1250    0.9150   +0.7900
+  mrr             0.0680    0.5915   +0.5235
+  mttc            9.8100    2.9550   -6.8550
+  technical       0.1067    0.7959   +0.6892
+  by scenario: boundary 1.000 | browsing 0.925 | buying 0.900 | intent_override 0.900
+  Index build 7.5s, full 200-session eval 0.8s.
+
+ABLATIONS (technical score):
+  full v1                        0.7959
+  minus phrase evidence          0.7922   (-0.004, within noise)
+  with slot erasure on override  0.7186   (-0.077)
+  minus category scoping         0.6557   (-0.140, and eval 0.8s -> 91s)
+  ask_attribute="feature"        0.5679   (-0.228)
+  ask_attribute=None             0.2032   (-0.593)
+
+Findings to hand to the team:
+1. CATEGORY SCOPING IS THE ENGINE. Simulator opens with the target's own coarse
+   category (last 2 cleaned path segments). Exact-bucket match puts the target in
+   the pool 200/200 times with a median pool of 194 items out of 50,000. Worth
+   +0.14 technical AND a 114x latency win. That is B4 solved as a side effect.
+2. SLOT ERASURE ON OVERRIDE IS HARMFUL HERE (for Person A, task A2). The simulator
+   draws its "revoked" old_value from the target product too, so it stays true.
+   Erasing it drops intent_override hit rate 0.900 -> 0.333 and mttc 4.47 -> 8.60.
+   Recommend: detect the override, reweight toward the new constraint, but do not
+   delete the old slot. Spec asks for erasure; measurement says don't.
+3. ask_attribute IS THE SINGLE BIGGEST LEVER AND IT SITS WITH A/C, NOT B. In the
+   evaluator, attribute "other" bypasses classify_constraint and discloses any two
+   undisclosed constraints per turn. Asking "other" vs "feature" is worth +0.228;
+   asking nothing at all is worth -0.593. Flagging that this is close to gaming the
+   simulator, and there is a human quality score too, so the team should decide.
+4. Phrase evidence is currently within noise (+0.004). Kept because it should matter
+   more once the private set's hand-authored intent cards paraphrase less literally,
+   but it is the first thing to cut if it costs latency.
+5. Price hierarchy deferred to the end, as agreed. Measured: budget reaches the
+   customer's mouth in 0/200 public sessions, despite 178/200 targets having a real
+   price, because intent_card truncates to 4 candidates and appends price last.
+   Keeping the band logic as cheap insurance in case private intent cards differ.
+
+Next: B2 dense half (FAISS) + B3 RRF fusion, then B4 memory trim (index is 560MB RSS).
+
+--- Session 3: B3 fusion + B2 dense half ---
+
+Shipped:
+- fusion.py  B3. Reciprocal Rank Fusion. Fuses by rank, not raw score, because
+             BM25 (unbounded), cosine (-1..1) and category depth (small int) are
+             on incomparable scales and normalising them means constants that need
+             retuning whenever any ranker changes. k=60 per Cormack et al.
+- engine.py  Rewired to four component rankers fused by RRF: lexical, category
+             metadata, phrase evidence, dense. Adds _category_scores, which
+             discriminates WITHIN an already-filtered category by how deep in the
+             path the customer's words match. --no-fusion keeps the old additive
+             scorer reproducible.
+- dense.py   B2 semantic half. Two interchangeable backends behind one interface:
+             "svd" (TF-IDF + truncated SVD, sklearn only, 46s build, no download)
+             and "st" (sentence-transformer, one-line swap). Unit-normalised so
+             cosine is a dot product. FAISS IndexFlatIP for unscoped queries only;
+             pool-restricted queries use a numpy gather, which is faster once the
+             category scope has cut the pool to ~200 rows.
+
+SCORE PROGRESSION (200 public sessions, ask_attribute="other"):
+  starter baseline                       0.1067
+  v1  category-scoped BM25 + phrase      0.7959
+  v2  + RRF fusion & category ranker     0.8569
+  v3  + phrase weight 0.4 -> 1.0         0.8732   <- current
+  hit_rate@10 0.9850 | mrr 0.6805 | mttc 2.175 | index 9.2s | eval 0.8s
+  by scenario: boundary 1.000 | browsing 0.988 | buying 0.988 | intent_override 0.967
+
+DENSE WEIGHT SWEEP (shared index, all else equal):
+  dense_w   hit@10     mrr    mttc  technical  eval_s
+     0.00   0.9850  0.6805    2.17     0.8732     2.0
+     0.10   0.9850  0.6778    2.19     0.8719    69.2
+     0.20   0.9800  0.6602    2.24     0.8633    70.3
+     0.35   0.9800  0.6494    2.25     0.8598    71.7
+     0.50   0.9800  0.6371    2.27     0.8556    66.8
+     1.00   0.9650  0.5819    2.45     0.8281    76.6
+
+Exec decision (B2/B3): DENSE SHIPS ATTACHED BUT WEIGHTED 0.0.
+  Monotonic: every gram of dense weight costs score, and any non-zero weight costs
+  ~40x eval latency (2.0s -> 70s). Cause is structural, not a bad encoder: the
+  simulator quotes the target product's own features/details verbatim, so there is
+  almost no paraphrase gap for semantics to close, and dense similarity just blurs
+  a ranking that exact matching already got right. Engine skips the dense
+  computation entirely at weight 0 rather than computing then discarding.
+  Kept in the codebase because B2 requires the dual index, it is built and tested,
+  and it is one config line away if the private set paraphrases instead of quotes.
+  Qualitatively it does work: "something sparkly for a wedding" returns bridal
+  rhinestone heels. Good demo material for D5 even though the benchmark ignores it.
+
+Caveat on the dense claim: measured with the SVD/LSA backend only. The
+sentence-transformer backend is written but UNMEASURED, because huggingface.co was
+blocked in the dev sandbox. Expect the same conclusion since the cause is
+structural, but say "untested" not "no better" when presenting it.
+
+Caveat on the weight sweep: n=200, so the standard error on hit rate is about
+0.012. Differences under ~0.02 (e.g. phrase 1.0 vs 2.0, 0.8732 vs 0.8740) are
+noise, and were NOT treated as real. The large steps (0.107 -> 0.796 -> 0.857) are
+far outside it. Chose round mid-plateau weights over sweep maxima to limit
+overfitting to the public 200.
+
+Housekeeping: set git config core.autocrlf true (local only). Repo had 18 files
+showing as modified that nobody touched, 1165 lines of pure CRLF/LF churn across
+starter/, evaluator/, docs/ and tests/. Anyone running `git add -A` on Windows
+would have committed that over four teammates' files. Now clean.
+
+Next: B4 memory trim (BM25 index is ~560MB RSS, postings dicts are the bulk),
+then the deferred price-band hierarchy as the last item.
+
+--- Session 3 close-out: commit + push status ---
+
+Steps taken:
+1. Set git config core.autocrlf true (local only) to stop 18 untouched files
+   showing as modified from CRLF/LF churn. Verified clean with a dry run first.
+2. Staged only my own paths (src/retrieval/, ANNA_dump/, .gitignore). Did NOT use
+   `git add -A`, which would have swept 1165 lines of line-ending churn across
+   starter/, evaluator/, docs/ and tests/ into the commit.
+3. Added .claude/, __pycache__/ and ANNA_dump/cache/ to .gitignore.
+4. Set git user.name/user.email locally to match the identity already in this
+   repo's history (the sandbox does not inherit the Windows git config).
+5. Committed 5eb09f8 "add: category-scoped hybrid retrieval engine (B1-B3)".
+6. PUSH NOT DONE. The dev sandbox has no GitHub credentials and no gh CLI, so it
+   cannot authenticate. Commit is sitting on local ANNA. Run from Windows:
+       git push origin ANNA
+   Not merging to main. Person D integrates via D1 when ready.
+
+--- PHASE 2 TODO, IN PRIORITY ORDER ---
+
+P1. SURVIVE DIFFERENT WORDING.  <- do this first
+    Why first: the whole 0.8732 rests on regexes tuned to the public simulator's
+    exact templates ("looking for X", "requirement is: Y", "what matters is: Y").
+    The organiser holds 800 private sessions we cannot see. If their phrasing
+    differs at all, category parsing returns None, constraint extraction returns
+    [], and the engine falls back to ranking the whole catalog on almost no
+    signal. That is not a small regression, it is most of the score.
+    Nothing else on this list is worth anything if this breaks.
+    Plan: (a) replace template matching with intent-based extraction that does not
+    depend on marker phrases, (b) build a perturbation harness that paraphrases
+    the simulator's templates and re-measures, (c) report score under perturbation
+    alongside the clean score, and treat the perturbed number as the honest one.
+
+P2. RAISE MRR.
+    Currently 0.6805. Hit rate is 0.985, so the item is almost always found, but
+    it lands at position 1 only about two thirds of the time. MRR is 30% of the
+    technical score, so this is the largest remaining headroom on the metric.
+    Caveat: overlaps Person C's task C2. Coordinate before spending time, or the
+    work gets done twice and neither version is defended properly.
+
+P3. FINISH B4 PROPERLY.
+    The only task with a genuine gap. Category scoping already delivered the pool
+    truncation and the latency (eval 0.8s for 200 sessions), but the explicit
+    deliverables are unwritten: memory trim (BM25 postings are ~560MB RSS, the
+    per-term dicts are the bulk) and slot decay over time.
+    Honest note: this will not move the score. It is a task-sheet deliverable and
+    a defensibility item, not an optimisation. Ranked below P2 for that reason,
+    above P4 because it is a stated requirement and P4 is not.
+
+P4. PRICE HEDGE.
+    Category-derived price bands as a soft ranking signal. Measured worth on the
+    public set: exactly zero, budget appears in 0/200 conversations. Kept purely
+    as insurance in case private intent cards are hand-authored and do mention
+    budget. Cheap to build since the category hierarchy already exists.
+    Last because it is the only item whose expected value is zero on everything
+    we can actually measure.
+
+Note on ordering: P2 outranks P3 on score impact, but P3 outranks P2 on certainty,
+since P2 may belong to Person C. If the team says C owns MRR, P3 becomes next.
+
+--- Session 4: P1 DONE. Phrasing robustness. ---
+
+Steps taken:
+
+1. Built ANNA_dump/perturb_eval.py before changing any code, to get an honest
+   "before" number. It swaps the simulator's sentence templates for paraphrases
+   while preserving identical information and identical disclosure logic, so any
+   score change is attributable to parsing and nothing else. Three styles:
+     clean    the organiser's own templates (control)
+     natural  conversational rewording, different markers
+     terse    markers stripped entirely, constraints stated bare
+
+2. Measured the old parser. Result was worse than feared:
+     clean    0.8732
+     natural  0.0000
+     terse    0.0000
+   Verified this was real and not a broken harness by printing the generated
+   messages and the parser output side by side. Messages were well-formed and
+   information-equivalent; the parser returned category=None, constraints=[] for
+   every single one. The engine was 100% dependent on the organiser's exact
+   wording. The public 0.8732 was, at that point, not a claim about retrieval
+   quality at all.
+
+3. Rewrote category detection as RECOGNITION rather than EXTRACTION. Instead of
+   pulling a span out of "looking for X", find_label matches the message against
+   the closed set of 1,115 category labels the catalog can actually produce:
+   template fast path, then longest verbatim label anywhere in the message, then
+   weighted token overlap for near misses (necklace/necklaces). Matching against
+   a known finite set is both more robust and more precise than guessing which
+   span of an arbitrary sentence is the category.
+
+4. Rewrote constraint extraction to not need marker phrases. Takes the whole turn
+   and removes what is known NOT to be a constraint: the category already stated,
+   and any leading clause that announces rather than states. Keeps two forms.
+   The stripped form feeds the word-matching query; every form feeds phrase
+   evidence, where a candidate that occurs in no document simply scores nothing.
+
+5. Three regressions found and fixed along the way, each caught by measuring
+   rather than by reading the code:
+   a. Later turns re-detected a category. "The things that matter to me are
+      leather" was read as the leather jackets category. Fix: category is sticky,
+      established once from the opening turn.
+   b. Splitting segments on the word "and" shredded real product phrases
+      ("Drop and Dangle"). 19 of 80 sampled constraints contain " and ". Fix:
+      "and" now only produces EXTRA candidates alongside the whole segment.
+   c. THE BIG ONE. Allowing an override turn to re-detect the category dropped
+      intent_override from 0.967 to 0.833 on its own, and accounted for the
+      entire clean-style regression; browsing, buying and boundary never moved.
+      Cause: an override turn names a new constraint and no category, so the
+      fuzzy matcher always returned something, silently moving the scope off the
+      target. Fix: an established category can only be replaced by one named
+      verbatim, never by the fuzzy matcher.
+
+RESULT, before and after, same harness:
+                    before      after
+    clean           0.8732     0.8702
+    natural         0.0000     0.8694
+    terse           0.0000     0.8728
+  All three now sit within 0.004 of each other. Performance no longer depends on
+  how the customer phrases things, which is the whole point.
+
+  Clean is down 0.003 from the pre-robustness peak. That is well inside the noise
+  floor (n=200, standard error on hit rate approx 0.012) and is the correct trade
+  regardless: 0.003 on wording we have seen, in exchange for not going to zero on
+  wording we have not.
+
+  Current headline: hit_rate@10 0.9850 | mrr 0.6727 | mttc 2.205 | technical 0.8702
+  by scenario: boundary 1.000 | browsing 0.988 | buying 0.988 | intent_override 0.967
+  intent_override MRR actually IMPROVED 0.814 -> 0.853, because the new parser
+  captures the customer's opening preference, which the marker-based one dropped
+  on the floor (that turn has no marker phrase in it).
+
+Note for the write-up: quote 0.8694 (the worst perturbed style) as the honest
+headline, not 0.8702. The clean number is measured on wording we were handed. The
+perturbed number is the one that estimates the 800 private sessions.
+
+Remaining, unchanged priority order: P2 raise MRR (coordinate with Person C
+first), P3 finish B4 properly, P4 price hedge.
