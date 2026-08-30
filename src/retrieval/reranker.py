@@ -1,18 +1,3 @@
-"""
-reranker.py
------------
-Task C1 (Candidate Scoring & Reranking) + Task C2 (MRR Optimization).
-
-Input:  the candidate pool Person B's hybrid retrieval already produced
-        (their job: make sure the right item is SOMEWHERE in this list — Hit Rate@10).
-Output: the SAME items, reordered so the correct one is as close to position 1
-        as possible (your job — MRR).
-
-Hard rule: never drop or add parent_asins. Only reorder. Dropping an item
-that B correctly retrieved breaks Hit Rate@10 too, which isn't your metric
-to break.
-"""
-
 import json
 import re
 
