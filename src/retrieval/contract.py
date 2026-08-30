@@ -1,27 +1,3 @@
-"""
-contract.py
------------
-Task C4 (API Contract Compliance).
-
-Matches docs/agent_api_contract.json's `turn_response` schema exactly:
-
-{
-  "message": str,                                # required
-  "ask_attribute": one of the enum below or null, # required
-  "recommendations": [                            # required, max 100 items
-      {"parent_asin": str, "score": number?}      # score is OPTIONAL
-  ],
-  "usage": {"prompt_tokens": int, "completion_tokens": int}  # NOT required,
-                                                               # but always include it —
-                                                               # cost disclosure is still
-                                                               # expected per the rules.
-}
-
-additionalProperties is false at every level in the schema, so:
-- the top-level dict must have ONLY these 4 keys, nothing extra
-- each recommendation dict must have ONLY parent_asin (+ optional score)
-"""
-
 ALLOWED_ATTRIBUTES = {
     "category", "material", "color", "size", "style",
     "brand", "budget", "feature", "use_case", "other", None,
