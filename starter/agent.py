@@ -3,7 +3,28 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 from pathlib import Path
+from importlib.util import spec_from_file_location, module_from_spec
+
+# Import routers from the parent's Conversational Logic folder
+conversational_logic_path = Path(__file__).parent.parent / "Conversational Logic"
+intent_router_path = conversational_logic_path / "intent_router.py"
+state_router_path = conversational_logic_path / "state_router.py"
+
+# Load intent_router module
+spec = spec_from_file_location("intent_router", intent_router_path)
+intent_router_module = module_from_spec(spec)
+spec.loader.exec_module(intent_router_module)
+IntentRouter = intent_router_module.IntentRouter
+IntentResult = intent_router_module.IntentResult
+
+# Load state_router module
+spec = spec_from_file_location("state_router", state_router_path)
+state_router_module = module_from_spec(spec)
+spec.loader.exec_module(state_router_module)
+StateTracker = state_router_module.StateTracker
+ConversationState = state_router_module.ConversationState
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -33,12 +54,20 @@ def _terms(text: str) -> list[str]:
 
 
 class Agent:
-    """Editable weak baseline: stateless BM25 retrieval with no LLM dependency."""
+    """Agent with intent routing, state tracking, and over-generality detection."""
 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._sessions: set[str] = set()
+        
+        # Initialize routers
+        self.intent_router = IntentRouter()
+        self.state_tracker = StateTracker()
+        
+        # Session state management
+        self._session_states: dict[str, ConversationState] = {}
+        
         self._build_index()
 
     def _build_index(self) -> None:
@@ -73,6 +102,8 @@ class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized and may be used for personalization.
         self._sessions.add(session_id)
+        # Initialize conversation state for this session
+        self._session_states[session_id] = ConversationState(session_id=session_id)
 
     def respond(
         self,
@@ -83,8 +114,45 @@ class Agent:
     ) -> dict:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
+        
+        state = self._session_states[session_id]
+        
+        # Step 1: Detect intent from user message
+        intent_result: IntentResult = self.intent_router.route(user_message)
+        
+        # Step 2: Update conversation state with constraints and intent
+        state = self.state_tracker.update_state(
+            state, 
+            user_message, 
+            intent_result.detected_constraints,
+            intent_result.track.value
+        )
+        
+        # Step 3: Check for over-generality before retrieval
+        # First, get candidate count to check threshold
         unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
         expression = " OR ".join(f'"{term}"' for term in unique_terms)
+        
+        if expression:
+            candidate_rows = self.connection.execute(
+                "SELECT COUNT(*) FROM products WHERE products MATCH ?",
+                (expression,),
+            ).fetchone()
+            candidate_count = candidate_rows[0] if candidate_rows else 0
+        else:
+            candidate_count = 0
+        
+        # Check if query is over-generalized
+        if self.state_tracker.check_over_generality(state, candidate_count):
+            clarification_prompt = self.state_tracker.generate_clarification_prompt(state)
+            return {
+                "message": clarification_prompt,
+                "ask_attribute": "specificity",
+                "recommendations": [],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            }
+        
+        # Step 4: Perform retrieval
         if not expression:
             recommendations: list[dict] = []
         else:
@@ -94,6 +162,7 @@ class Agent:
                 (expression, top_k),
             ).fetchall()
             recommendations = [{"parent_asin": str(row[0])} for row in rows]
+        
         return {
             "message": "Here are the closest matches I found.",
             "ask_attribute": None,
