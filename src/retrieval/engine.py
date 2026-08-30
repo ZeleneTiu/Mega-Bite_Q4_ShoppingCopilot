@@ -32,20 +32,50 @@ from .fusion import reciprocal_rank_fusion
 from .lexical import LexicalIndex
 from .text import normalise, tokenise
 
-# The simulator states constraints after a colon, and separates multiple
-# constraints in one breath with a semicolon.
-_CONSTRAINT_RE = re.compile(r"(?:requirement is|what matters is|what I need is|need is)\s*:?\s*(.+)", re.IGNORECASE)
-
-# Turns that carry no new information. Matching these stops us polluting
-# the query with the simulator's own filler wording.
-_EMPTY_TURN_RE = re.compile(
-    r"(don't have (?:an additional |a )?preference|use your judgment|"
-    r"not quite right yet|ask me about one specific attribute)",
+# Leading clauses that announce a constraint without being part of it.
+# Stripped so phrase matching compares product text against product text,
+# not against the customer's framing. Deliberately covers many phrasings:
+# the public simulator uses one, the private set may use others.
+_LEAD_MARKER_RE = re.compile(
+    r"^.{0,80}?\b(?:"
+    r"requirement is|requirements are|key requirement|what matters is|"
+    r"what i need is|things that matter to me are|matters? to me (?:is|are)|"
+    r"needs? to be|must (?:have|be)|has to be|have to be|"
+    r"i(?:'m| am)?\s*(?:want|need|after|looking for|really want)|"
+    r"prefer(?:ably)?|ideally|specifically"
+    r")\b\s*:?\s*",
     re.IGNORECASE,
 )
 
-# Wording the simulator uses when it revokes an earlier preference.
-_OVERRIDE_RE = re.compile(r"\b(actually|instead|ignore my earlier|change to|rather than)\b", re.IGNORECASE)
+# Turns that carry no new information. Matching these stops us polluting
+# the query with the simulator's filler. Broadened well beyond the public
+# templates, since a false negative here costs far less than a false
+# positive: at worst we add a little noise to the query.
+_EMPTY_TURN_RE = re.compile(
+    r"(don'?t have (?:an additional |a )?preference|no (?:strong )?(?:feelings|preference)|"
+    r"does ?n'?t matter|no opinion|use your judg?ment|your call|up to you|"
+    r"not quite (?:right)?|nothing (?:else|more)(?: to add)?|"
+    r"ask me (?:about )?(?:one |some)?(?:thing|specific)|^\s*nope\b)",
+    re.IGNORECASE,
+)
+
+# Wording that revokes an earlier preference.
+_OVERRIDE_RE = re.compile(
+    r"\b(actually|instead|ignore my earlier|ignore what i said|change to|"
+    r"rather than|scratch that|forget what i said|on second thought)\b",
+    re.IGNORECASE,
+)
+
+# Primary separators: a semicolon, or a sentence boundary. These reliably
+# divide one constraint from the next.
+_SEGMENT_RE = re.compile(r";|(?<=[a-z0-9])\.\s+(?=[A-Z])")
+
+# Secondary separator. Conversational phrasing joins constraints with "and",
+# but so do plenty of real product phrases ("Drop and Dangle", "Shoes and
+# Jewelry"): 19 of 80 sampled constraints contain it. So "and" only ever
+# produces EXTRA candidates alongside the whole segment, never instead of
+# it. Splitting on it outright cost 0.8732 -> 0.8543 on the public set.
+_SUBSPLIT_RE = re.compile(r"\band\b", re.IGNORECASE)
 
 # A phrase must be at least this long to count as evidence. Shorter
 # fragments are single words that BM25 already handles.
@@ -60,6 +90,10 @@ class SessionState:
     # Constraints in disclosure order. Earlier entries may be revoked by
     # an override; see `overridden_before`.
     constraints: list[str] = field(default_factory=list)
+    # Every candidate form of every constraint, including the customer's
+    # framing. Used only for phrase evidence, where a candidate that never
+    # occurs in any document simply contributes nothing.
+    phrases: list[str] = field(default_factory=list)
     # Index into `constraints`: entries before this were revoked.
     overridden_before: int = 0
     turn: int = 0
@@ -119,12 +153,26 @@ class SearchEngine:
         """Fold one customer turn into the session state."""
         state = self.state(session_id)
         state.turn += 1
+        is_override = bool(_OVERRIDE_RE.search(message))
 
-        label = CategoryIndex.parse_label(message)
-        if label:
-            state.category_label = label
+        # Category is sticky. It is established once, from the opening
+        # turn, and only revisited when the customer explicitly revokes
+        # something. Without this, a later turn mentioning "leather" gets
+        # mis-read as a request for the leather jackets category and the
+        # scope silently moves off the target.
+        if state.category_label is None:
+            state.category_label = self.categories.find_label(message)
+        elif is_override:
+            # An override revokes a preference, not usually the category.
+            # Only a category named verbatim may replace an established
+            # one: allowing the fuzzy matcher to act here cost intent
+            # override 0.967 -> 0.833, because the override turn names a
+            # constraint and no category, so the matcher invented one.
+            replacement = self.categories.find_label(message, verbatim_only=True)
+            if replacement:
+                state.category_label = replacement
 
-        if _OVERRIDE_RE.search(message):
+        if is_override:
             # Mark everything disclosed so far as revoked. Whether that
             # revocation is honoured at ranking time is a separate switch.
             state.overridden_before = len(state.constraints)
@@ -132,19 +180,63 @@ class SearchEngine:
         if _EMPTY_TURN_RE.search(message):
             return state
 
-        for value in self._extract_constraints(message):
+        preferred, candidates = self._parse_turn(message, state.category_label)
+        for value in preferred:
             if value not in state.constraints:
                 state.constraints.append(value)
+        for value in candidates:
+            if value not in state.phrases:
+                state.phrases.append(value)
         return state
 
+    @classmethod
+    def _extract_constraints(cls, message: str, category_label: str | None = None) -> list[str]:
+        """Preferred constraint forms only. Thin wrapper kept for tests."""
+        return cls._parse_turn(message, category_label)[0]
+
     @staticmethod
-    def _extract_constraints(message: str) -> list[str]:
-        """Pull stated constraint strings out of a customer turn."""
-        match = _CONSTRAINT_RE.search(message)
-        if not match:
-            return []
-        tail = match.group(1).strip().rstrip(".")
-        return [part.strip() for part in tail.split(";") if part.strip()]
+    def _parse_turn(message: str, category_label: str | None = None) -> tuple[list[str], list[str]]:
+        """Pull constraint text out of a turn without relying on templates.
+
+        Rather than hunting for a marker phrase and giving up when it is
+        absent, this takes the whole turn as constraint text and removes
+        what is known not to be a constraint: the category the customer
+        already stated, and any leading clause that announces rather than
+        states. Both the stripped and the unstripped form are kept, because
+        phrase evidence only ever adds score when a phrase actually occurs
+        in a document, so a redundant candidate costs nothing but a lookup.
+        """
+        text = message.strip()
+        if category_label:
+            # Remove the category span, case-insensitively, so it is not
+            # re-counted as a constraint phrase.
+            text = re.sub(re.escape(category_label), " ", text, flags=re.IGNORECASE)
+
+        preferred: list[str] = []   # feeds the word-matching query
+        candidates: list[str] = []  # feeds phrase evidence
+        for segment in _SEGMENT_RE.split(text):
+            if segment is None:
+                continue
+            segment = segment.strip().strip(".,;:!? ").strip()
+            if len(segment) < 3:
+                continue
+            candidates.append(segment)
+            stripped = _LEAD_MARKER_RE.sub("", segment).strip(".,;:!? ").strip()
+            if stripped and stripped != segment and len(stripped) >= 3:
+                candidates.append(stripped)
+            # Extra candidates either side of an "and", in case the turn
+            # really was joining two separate constraints. Additive only.
+            base = stripped if stripped else segment
+            if _SUBSPLIT_RE.search(base):
+                for piece in _SUBSPLIT_RE.split(base):
+                    piece = piece.strip(".,;:!? ").strip()
+                    if len(piece) >= 4:
+                        candidates.append(piece)
+            # The query gets the announcing clause removed. Keeping it in
+            # dilutes BM25 with the customer's framing, which measured as
+            # 0.8732 -> 0.8543 on the public templates.
+            preferred.append(stripped if stripped and len(stripped) >= 3 else segment)
+        return list(dict.fromkeys(preferred)), list(dict.fromkeys(candidates))
 
     # ------------------------------------------------------------------
     def search(self, session_id: str, top_k: int = 10) -> list[tuple[str, float]]:
@@ -182,8 +274,8 @@ class SearchEngine:
             "lexical": self.lexical.score(terms, pool),
             "category": self._category_scores(terms, pool),
         }
-        if constraints:
-            components["phrase"] = self._phrase_evidence(constraints, pool)
+        if state.phrases:
+            components["phrase"] = self._phrase_evidence(state.phrases, pool)
         # Skipped entirely at weight 0, not just down-weighted: the encode
         # plus gather is ~40x the cost of the whole lexical path, and the
         # sweep in ANNA_dump/log.txt shows it earns nothing on this

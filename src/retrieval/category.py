@@ -47,7 +47,13 @@ class CategoryIndex:
     # ------------------------------------------------------------------
     @staticmethod
     def parse_label(message: str) -> str | None:
-        """Pull the stated category out of an opening customer message."""
+        """Template fast path: pull the category out of "looking for X".
+
+        Kept only as a first attempt. :meth:`find_label` is the entry point
+        callers should use, because this one fails completely the moment
+        the customer phrases the request any other way, which measured as a
+        drop from 0.8732 to 0.0000 on reworded messages.
+        """
         match = _CATEGORY_RE.search(message)
         if not match:
             return None
@@ -55,6 +61,75 @@ class CategoryIndex:
         # Guard against the phrase running away into a long sentence when
         # the simulator's category itself contained no terminator.
         return label if label and len(label) < 120 else None
+
+    def find_label(self, message: str, verbatim_only: bool = False) -> str | None:
+        """Recognise the category by content, not by sentence template.
+
+        Three attempts, cheapest first:
+          1. the template fast path, if the wording happens to match;
+          2. the longest known category label occurring anywhere in the
+             message as a substring;
+          3. the known label with the strongest weighted token overlap.
+
+        Recognition beats extraction here: we already hold all 1,115 labels
+        the catalog can produce, so matching against that closed set is
+        both more robust and more precise than trying to guess which span
+        of an arbitrary sentence is the category.
+        """
+        text = normalise(message)
+
+        # 1. Template fast path, but only trust it if it names a real bucket.
+        quick = self.parse_label(message)
+        if quick and quick in self._coarse_arrays:
+            return quick
+
+        # 2. Longest label appearing verbatim. Longest wins because a more
+        #    specific label is a better scope, and ties break on the
+        #    earliest position, which is where a customer states intent.
+        best: tuple[int, int, str] | None = None
+        for label in self._coarse_arrays:
+            position = text.find(label)
+            if position < 0:
+                continue
+            key = (len(label), -position, label)
+            if best is None or key > best:
+                best = key
+        if best is not None:
+            return best[2]
+
+        # 3. Nothing verbatim. Fall back to weighted token overlap, so a
+        #    near miss ("necklace" vs "necklaces") still scopes correctly.
+        #    Callers replacing an ALREADY-established category must pass
+        #    verbatim_only: the fuzzy matcher will always return something
+        #    for a message that contains no category at all, which is how
+        #    an override turn ends up silently moving the scope.
+        if verbatim_only:
+            return None
+        return self._best_overlap_label(text)
+
+    def _best_overlap_label(self, text: str, min_score: float = 0.45) -> str | None:
+        """Highest-scoring label by share of its tokens present in the text."""
+        tokens = set(tokenise(text, keep_stopwords=True))
+        if not tokens:
+            return None
+        # Also admit simple singular/plural variants, which is the most
+        # common near miss between spoken wording and catalog wording.
+        tokens |= {t[:-1] for t in tokens if t.endswith("s") and len(t) > 3}
+        tokens |= {t + "s" for t in tokens}
+        best_label, best_score = None, 0.0
+        for label, docs in self._coarse_arrays.items():
+            parts = tokenise(label, keep_stopwords=True)
+            if not parts:
+                continue
+            hits = sum(1 for part in parts if part in tokens)
+            if not hits:
+                continue
+            # Share of the label matched, nudged toward more specific
+            # labels so a one-word generic bucket cannot win on a fluke.
+            score = (hits / len(parts)) * (1.0 + 0.08 * len(parts))
+            if score > best_score:
+                best_label, best_score = label, score
+        return best_label if best_score >= min_score else None
 
     # ------------------------------------------------------------------
     def scope(self, label: str | None, min_pool: int = 10) -> "Scope":

@@ -20,6 +20,15 @@ STOPWORDS = frozenset({
     "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
     "that", "the", "this", "to", "want", "with", "would", "you", "looking",
     "im", "need", "want", "key", "requirement", "still", "exploring",
+    # Conversational filler. Added when the parser stopped relying on
+    # sentence templates and started taking whole turns as query text:
+    # these words then reach the query, and none of them discriminate
+    # between products.
+    "hey", "hi", "really", "just", "browsing", "nothing", "specific",
+    "mind", "quite", "yet", "ask", "about", "something", "one", "your",
+    "call", "else", "more", "scratch", "forget", "said", "before",
+    "what", "matter", "matters", "things", "must", "have", "has", "needs",
+    "after", "prefer", "ideally", "nope", "does", "dont", "doesnt",
 })
 
 

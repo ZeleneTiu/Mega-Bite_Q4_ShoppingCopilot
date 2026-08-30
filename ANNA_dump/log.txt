@@ -143,3 +143,141 @@ would have committed that over four teammates' files. Now clean.
 
 Next: B4 memory trim (BM25 index is ~560MB RSS, postings dicts are the bulk),
 then the deferred price-band hierarchy as the last item.
+
+--- Session 3 close-out: commit + push status ---
+
+Steps taken:
+1. Set git config core.autocrlf true (local only) to stop 18 untouched files
+   showing as modified from CRLF/LF churn. Verified clean with a dry run first.
+2. Staged only my own paths (src/retrieval/, ANNA_dump/, .gitignore). Did NOT use
+   `git add -A`, which would have swept 1165 lines of line-ending churn across
+   starter/, evaluator/, docs/ and tests/ into the commit.
+3. Added .claude/, __pycache__/ and ANNA_dump/cache/ to .gitignore.
+4. Set git user.name/user.email locally to match the identity already in this
+   repo's history (the sandbox does not inherit the Windows git config).
+5. Committed 5eb09f8 "add: category-scoped hybrid retrieval engine (B1-B3)".
+6. PUSH NOT DONE. The dev sandbox has no GitHub credentials and no gh CLI, so it
+   cannot authenticate. Commit is sitting on local ANNA. Run from Windows:
+       git push origin ANNA
+   Not merging to main. Person D integrates via D1 when ready.
+
+--- PHASE 2 TODO, IN PRIORITY ORDER ---
+
+P1. SURVIVE DIFFERENT WORDING.  <- do this first
+    Why first: the whole 0.8732 rests on regexes tuned to the public simulator's
+    exact templates ("looking for X", "requirement is: Y", "what matters is: Y").
+    The organiser holds 800 private sessions we cannot see. If their phrasing
+    differs at all, category parsing returns None, constraint extraction returns
+    [], and the engine falls back to ranking the whole catalog on almost no
+    signal. That is not a small regression, it is most of the score.
+    Nothing else on this list is worth anything if this breaks.
+    Plan: (a) replace template matching with intent-based extraction that does not
+    depend on marker phrases, (b) build a perturbation harness that paraphrases
+    the simulator's templates and re-measures, (c) report score under perturbation
+    alongside the clean score, and treat the perturbed number as the honest one.
+
+P2. RAISE MRR.
+    Currently 0.6805. Hit rate is 0.985, so the item is almost always found, but
+    it lands at position 1 only about two thirds of the time. MRR is 30% of the
+    technical score, so this is the largest remaining headroom on the metric.
+    Caveat: overlaps Person C's task C2. Coordinate before spending time, or the
+    work gets done twice and neither version is defended properly.
+
+P3. FINISH B4 PROPERLY.
+    The only task with a genuine gap. Category scoping already delivered the pool
+    truncation and the latency (eval 0.8s for 200 sessions), but the explicit
+    deliverables are unwritten: memory trim (BM25 postings are ~560MB RSS, the
+    per-term dicts are the bulk) and slot decay over time.
+    Honest note: this will not move the score. It is a task-sheet deliverable and
+    a defensibility item, not an optimisation. Ranked below P2 for that reason,
+    above P4 because it is a stated requirement and P4 is not.
+
+P4. PRICE HEDGE.
+    Category-derived price bands as a soft ranking signal. Measured worth on the
+    public set: exactly zero, budget appears in 0/200 conversations. Kept purely
+    as insurance in case private intent cards are hand-authored and do mention
+    budget. Cheap to build since the category hierarchy already exists.
+    Last because it is the only item whose expected value is zero on everything
+    we can actually measure.
+
+Note on ordering: P2 outranks P3 on score impact, but P3 outranks P2 on certainty,
+since P2 may belong to Person C. If the team says C owns MRR, P3 becomes next.
+
+--- Session 4: P1 DONE. Phrasing robustness. ---
+
+Steps taken:
+
+1. Built ANNA_dump/perturb_eval.py before changing any code, to get an honest
+   "before" number. It swaps the simulator's sentence templates for paraphrases
+   while preserving identical information and identical disclosure logic, so any
+   score change is attributable to parsing and nothing else. Three styles:
+     clean    the organiser's own templates (control)
+     natural  conversational rewording, different markers
+     terse    markers stripped entirely, constraints stated bare
+
+2. Measured the old parser. Result was worse than feared:
+     clean    0.8732
+     natural  0.0000
+     terse    0.0000
+   Verified this was real and not a broken harness by printing the generated
+   messages and the parser output side by side. Messages were well-formed and
+   information-equivalent; the parser returned category=None, constraints=[] for
+   every single one. The engine was 100% dependent on the organiser's exact
+   wording. The public 0.8732 was, at that point, not a claim about retrieval
+   quality at all.
+
+3. Rewrote category detection as RECOGNITION rather than EXTRACTION. Instead of
+   pulling a span out of "looking for X", find_label matches the message against
+   the closed set of 1,115 category labels the catalog can actually produce:
+   template fast path, then longest verbatim label anywhere in the message, then
+   weighted token overlap for near misses (necklace/necklaces). Matching against
+   a known finite set is both more robust and more precise than guessing which
+   span of an arbitrary sentence is the category.
+
+4. Rewrote constraint extraction to not need marker phrases. Takes the whole turn
+   and removes what is known NOT to be a constraint: the category already stated,
+   and any leading clause that announces rather than states. Keeps two forms.
+   The stripped form feeds the word-matching query; every form feeds phrase
+   evidence, where a candidate that occurs in no document simply scores nothing.
+
+5. Three regressions found and fixed along the way, each caught by measuring
+   rather than by reading the code:
+   a. Later turns re-detected a category. "The things that matter to me are
+      leather" was read as the leather jackets category. Fix: category is sticky,
+      established once from the opening turn.
+   b. Splitting segments on the word "and" shredded real product phrases
+      ("Drop and Dangle"). 19 of 80 sampled constraints contain " and ". Fix:
+      "and" now only produces EXTRA candidates alongside the whole segment.
+   c. THE BIG ONE. Allowing an override turn to re-detect the category dropped
+      intent_override from 0.967 to 0.833 on its own, and accounted for the
+      entire clean-style regression; browsing, buying and boundary never moved.
+      Cause: an override turn names a new constraint and no category, so the
+      fuzzy matcher always returned something, silently moving the scope off the
+      target. Fix: an established category can only be replaced by one named
+      verbatim, never by the fuzzy matcher.
+
+RESULT, before and after, same harness:
+                    before      after
+    clean           0.8732     0.8702
+    natural         0.0000     0.8694
+    terse           0.0000     0.8728
+  All three now sit within 0.004 of each other. Performance no longer depends on
+  how the customer phrases things, which is the whole point.
+
+  Clean is down 0.003 from the pre-robustness peak. That is well inside the noise
+  floor (n=200, standard error on hit rate approx 0.012) and is the correct trade
+  regardless: 0.003 on wording we have seen, in exchange for not going to zero on
+  wording we have not.
+
+  Current headline: hit_rate@10 0.9850 | mrr 0.6727 | mttc 2.205 | technical 0.8702
+  by scenario: boundary 1.000 | browsing 0.988 | buying 0.988 | intent_override 0.967
+  intent_override MRR actually IMPROVED 0.814 -> 0.853, because the new parser
+  captures the customer's opening preference, which the marker-based one dropped
+  on the floor (that turn has no marker phrase in it).
+
+Note for the write-up: quote 0.8694 (the worst perturbed style) as the honest
+headline, not 0.8702. The clean number is measured on wording we were handed. The
+perturbed number is the one that estimates the 800 private sessions.
+
+Remaining, unchanged priority order: P2 raise MRR (coordinate with Person C
+first), P3 finish B4 properly, P4 price hedge.
