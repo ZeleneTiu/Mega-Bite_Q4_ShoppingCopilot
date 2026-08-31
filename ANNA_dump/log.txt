@@ -350,3 +350,74 @@ Cumulative: 0.1067 -> 0.7959 -> 0.8569 -> 0.8732 -> 0.8702 (robust) -> 0.9092.
 
 TODO now: P3 finish B4 properly (memory trim, slot decay), P4 price hedge.
 P2 closed on the B side. Any further MRR work is C2 and should not be duplicated.
+
+--- Session 6: P3 done. B4 properly finished. ---
+
+B4 had three named deliverables. Candidate pool truncation was already delivered
+by category scoping in session 2. The other two are now done and measured.
+
+(a) MEMORY TRIM
+  Profiled before optimising. LexicalIndex was the whole problem: 561MB peak,
+  536MB resident, for postings whose actual data is 34MB. Cause was the obvious
+  implementation, dict[term][doc_id] = weight. Python dict entries cost roughly
+  100 bytes each, 4.3M of them is ~430MB, and CPython never returns the freed
+  arenas to the OS, so the spike became permanent resident.
+
+  Rewrote the index as CSR-style flat arrays: offsets[t]..offsets[t+1] slices
+  doc_ids and freqs. Same information, no per-entry object overhead, and the
+  build accumulates into chunked arrays rather than dicts so the peak is bounded
+  too. Also removed 201,912 separate small numpy arrays (22.6MB of pure object
+  overhead) by collapsing to three arrays total.
+
+  Then Catalog.compact(), called once both indexes exist: the six per-field text
+  lists collapse to one joined string per document plus the category text, since
+  those are the only two remaining consumers. First attempt made resident WORSE
+  (224 -> 266MB) because it built the joined list while the originals were still
+  referenced. Fixed by releasing each source string as it is consumed.
+
+                    before     after
+    peak RSS         561 MB    361 MB   (-36%)
+    resident RSS     536 MB    226 MB   (-58%)
+    phrase lookup    6.5 ms     4.4 ms  (-32%, from removing the six-way join)
+    vocabulary, postings, and top-1 result all identical. Score unchanged.
+
+(b) SLOT DECAY
+  Implemented as a weight on each constraint: slot_decay ** (turns since it was
+  disclosed), times override_penalty for constraints the customer has revoked.
+  The weight reaches BM25 itself via a new term_weights argument, not just the
+  phrase signal, so decay actually affects ranking rather than decorating it.
+
+  Swept both knobs. Result is monotonic and unambiguous:
+    decay  ovr_pen  technical   override_hit  override_mrr
+     1.00     1.00     0.9092          0.967         0.853   <- chosen (both off)
+     1.00     0.70     0.9091          0.967         0.851
+     1.00     0.40     0.9036          0.933         0.800
+     1.00     0.00     0.8780          0.900         0.305
+     0.95     1.00     0.9051          0.967         0.853
+     0.85     1.00     0.9021          0.967         0.853
+     0.70     0.00     0.8694          0.900         0.305
+
+  SHIPS AT 1.0/1.0, i.e. built, tested, and disabled. Same honest pattern as the
+  dense index. Reason is structural, not a tuning failure: decay assumes older
+  information goes stale, and in this benchmark it never does. Every constraint
+  the simulator discloses is derived from the same target product and stays true
+  for the whole session, including the one it claims to revoke.
+
+  The override_penalty gradient is the strongest evidence yet for the session 2
+  finding, and worth showing Person A directly. Fading a revoked preference to
+  40% costs a little. Deleting it outright collapses intent_override MRR from
+  0.853 to 0.305. Task A2 asks for slot erasure; the measurement says fade at
+  most, and preferably do not touch it at all.
+
+  Decay would earn its place in a system where intent genuinely drifts across
+  long or repeated sessions. This benchmark cannot reward it. Say that rather
+  than claiming it helps.
+
+STATE AFTER P3:
+  hit_rate@10 0.9850 | mrr 0.8362 | mttc 2.710 | efficiency 0.8290
+  technical 0.9092 clean, 0.9045 natural, 0.9096 terse
+  build 11.3s | 200-session eval 1.6s | 226MB resident
+  Score progression: 0.1067 -> 0.7959 -> 0.8569 -> 0.8732 -> 0.8702 (robust)
+                     -> 0.9092 (evidence gate) -> 0.9092 (B4, score-neutral)
+
+Remaining: P4 price hedge, the last item.

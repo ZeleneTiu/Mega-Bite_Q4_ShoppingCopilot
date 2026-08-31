@@ -94,6 +94,9 @@ class SessionState:
     # framing. Used only for phrase evidence, where a candidate that never
     # occurs in any document simply contributes nothing.
     phrases: list[str] = field(default_factory=list)
+    # Turn on which each entry of `constraints` was disclosed, parallel to
+    # it. Drives B4's slot decay.
+    constraint_turns: list[int] = field(default_factory=list)
     # Index into `constraints`: entries before this were revoked.
     overridden_before: int = 0
     turn: int = 0
@@ -111,13 +114,20 @@ class SearchEngine:
         catalog_path: str = "data/catalog.jsonl",
         drop_overridden: bool = False,
         phrase_weight: float = 1.6,
+        slot_decay: float = 1.0,
+        override_penalty: float = 1.0,
         dense: "object | None" = None,
         use_fusion: bool = True,
         weights: dict[str, float] | None = None,
+        compact_catalog: bool = True,
     ) -> None:
         self.catalog = catalog or Catalog.load(catalog_path)
         self.categories = CategoryIndex(self.catalog)
         self.lexical = LexicalIndex(self.catalog)
+        # B4: both indexes are built, so the per-field text can go. Frees
+        # roughly 60MB and removes a six-way join from the phrase path.
+        if compact_catalog:
+            self.catalog.compact()
         # Optional DenseIndex. Absent means the engine runs lexical-only,
         # which is the configuration measured at technical score 0.796.
         self.dense = dense
@@ -127,6 +137,15 @@ class SearchEngine:
         # too, so erasing it throws away true signal. See ANNA_dump/log.txt.
         self.drop_overridden = drop_overridden
         self.phrase_weight = phrase_weight
+        # B4 slot decay. A constraint contributes slot_decay ** age, where
+        # age is how many turns ago it was disclosed. 1.0 disables it.
+        self.slot_decay = slot_decay
+        # Multiplier for constraints the customer has since revoked. This
+        # is the middle ground between keeping them at full strength and
+        # deleting them: erasure measured at 0.7186 vs 0.8702 for keeping,
+        # because the simulator draws the revoked preference from the
+        # target product too, so it stays true. 1.0 disables the penalty.
+        self.override_penalty = override_penalty
         self.use_fusion = use_fusion
         # B3 fusion weights, one per ranker. Dense starts at parity with
         # keyword and is tuned in B5 against the public set.
@@ -184,6 +203,7 @@ class SearchEngine:
         for value in preferred:
             if value not in state.constraints:
                 state.constraints.append(value)
+                state.constraint_turns.append(state.turn)
         for value in candidates:
             if value not in state.phrases:
                 state.phrases.append(value)
@@ -301,6 +321,16 @@ class SearchEngine:
         return ranked[:top_k]
 
     # ------------------------------------------------------------------
+    def _constraint_weight(self, state: SessionState, index: int) -> float:
+        """B4 slot decay: how much a given constraint still counts for."""
+        weight = 1.0
+        if self.slot_decay != 1.0:
+            age = max(0, state.turn - state.constraint_turns[index])
+            weight *= self.slot_decay ** age
+        if index < state.overridden_before:
+            weight *= self.override_penalty
+        return weight
+
     def _rank(self, state: SessionState, pool: np.ndarray, top_k: int) -> list[tuple[str, float]]:
         if not len(pool):
             return []
@@ -308,14 +338,24 @@ class SearchEngine:
 
         # Query text: the stated constraints plus the category label, so a
         # bare browsing turn still ranks sensibly on category words alone.
-        query = " ".join(constraints)
+        # Terms carry the weight of the constraint they came from, so slot
+        # decay reaches BM25 rather than only the phrase signal.
+        terms: list[str] = []
+        term_weights: list[float] = []
         if state.category_label:
-            query = f"{state.category_label} {query}".strip()
-        terms = tokenise(query)
+            for token in tokenise(state.category_label):
+                terms.append(token)
+                term_weights.append(1.0)
+        offset = state.overridden_before if self.drop_overridden else 0
+        for index in range(offset, len(state.constraints)):
+            weight = self._constraint_weight(state, index)
+            for token in tokenise(state.constraints[index]):
+                terms.append(token)
+                term_weights.append(weight)
 
         # --- component rankers, each scored over the same pool ---------
         components: dict[str, np.ndarray] = {
-            "lexical": self.lexical.score(terms, pool),
+            "lexical": self.lexical.score(terms, pool, term_weights),
             "category": self._category_scores(terms, pool),
         }
         if state.phrases:
@@ -325,7 +365,7 @@ class SearchEngine:
         # sweep in ANNA_dump/log.txt shows it earns nothing on this
         # benchmark. Attaching it is opt-in, and paid for only if used.
         if self.dense is not None and self.weights.get("dense", 0.0) > 0.0:
-            components["dense"] = self.dense.score(query, pool)
+            components["dense"] = self.dense.score(" ".join(constraints), pool)
 
         if self.use_fusion:
             # B3: fuse by rank, not by score. See fusion.py for why.
