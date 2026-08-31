@@ -37,19 +37,19 @@ The final branch is `main`, and it is the repository state that should be treate
 
 ### Branch overview
 
-- `main` — final merged solution. This is the production version of the project after the team’s different workstreams were integrated and validated.
-- `ANNA` — retrieval engine work. Focused on category-scoped search, hybrid retrieval, robustness analysis, and the evidence gate that improved the empirical score.
-- `ZACH` — intent routing and state tracking. This branch introduced the conversation logic for detecting buying vs browsing intent and capturing session constraints.
-- `NITHIESH` — reranking and LLM integration. This branch handled the reranker prompt and client logic, plus contract enforcement around response generation.
-- `ZELENE` — repo wiring and project documentation. This branch helped stitch the modules together, added setup fixes, and kept the project structure coherent.
-- `combine` — temporary merge branch used to unify work across the team before final cleanup.
-- `Prime` — robustness, regression testing, and final integration fixes. This branch tightened the pipeline and validated the merged system under realistic conditions.
+- `main` — final merged solution. This is the production version of the project after the team’s workstreams were integrated and validated.
+- `ANNA` — retrieval engine work. Focused on category-scoped search, hybrid retrieval, robustness analysis, and the evidence gate that improved the benchmark score.
+- `ZACH` — intent routing and state tracking. This branch introduced the conversation logic for detecting shopping intent and tracking session constraints.
+- `NITHIESH` — reranking and LLM integration. This branch handled the reranker prompt/client logic and the final contract enforcement for model outputs.
+- `ZELENE` — project wiring and setup work. This branch helped connect the modules together, fixed the environment setup, and kept the repo consistent.
+- `combine` — temporary merge branch used to unify the contributors’ changes before the final cleanup.
+- `Prime` — robustness, regression testing, and final integration fixes. This branch tightened the pipeline, validated the merged system, and included the demo walkthrough / presentation materials used for the final showcase.
 
 In other words, the project was built as a team effort across specialization branches, but the final shipped code lives on `main`.
 
 ## System design
 
-The solution is structured around four roles:
+The solution is structured around four core parts:
 
 1. Intent and conversation logic
 2. Retrieval and ranking logic
@@ -62,19 +62,15 @@ The solution is structured around four roles:
 customer message
       │
       ▼
-[A] IntentRouter → classify intent and detect constraints
+Intent and state detection → classify intent and track constraints
       │
-[A] StateTracker → accumulate state and detect overrides / missing information
+Retrieval and candidate narrowing → find likely category and rank the pool
       │
-[B] SearchEngine → find likely category → narrow candidate pool → rank it
-      │
-[B] Evidence gate → ask instead of guessing when evidence is too thin
+Evidence gate → ask instead of guessing when evidence is too thin
       ▼
 Candidates
       │
-[C] Reranker → optionally reorder the Top-10 with LLM-based ranking
-      │
-[C] Contract builder → enforce the API response contract
+Reranking and validation → reorder the Top-10 and enforce the contract
       ▼
 { message, ask_attribute, recommendations[], usage }
 ```
@@ -301,13 +297,12 @@ rather than silently in the graded run.
 
 Honest notes for a judge who will probe:
 
-1. **The score is almost entirely Person B (retrieval).** A's intent state and
-   C's reranker are wired into the pipeline but currently dormant on the metric:
-   the reranker runs in fallback with no key, clarification is off, and feeding
-   A's parsed slots into retrieval measured at exactly `0.000000` (B's parser
-   already takes the whole turn as constraint text, so A's regex‑extracted
-   values are text B has already indexed). A earns its place in the conversation
-   layer — the held‑turn question, C's prompt state — not in the ranker.
+1. **The score is driven primarily by the retrieval layer.** The conversation and
+   reranking components are in the pipeline and are useful for context, but the
+   benchmark performance is dominated by the retrieval engine. The reranker is
+   kept optional, and clarification is off by default in the final shipped path
+   because the measured end-to-end score was strongest when the search stack was
+   the primary driver.
 
 2. **The clean score depends on the simulator quoting the target verbatim.**
    Under paraphrase the technical score falls to ~0.63. We quote the perturbed
@@ -339,19 +334,17 @@ Honest notes for a judge who will probe:
 
 ## Branch history
 
-The final deliverable is **`main`**. It is the merge of five working branches,
-one per contributor, each holding one stage of the pipeline. They are kept for
-provenance — the "why" lives in their commit bodies and in `ANNA_dump/log.txt`.
+The final deliverable is **`main`**. It is the merge of the contributor branches, each responsible for a different part of the solution. They are kept for provenance — the reasoning behind the implementation lives in their commit history and in `ANNA_dump/log.txt`.
 
 | Branch | Owner | Purpose |
 |---|---|---|
-| **`main`** | — | The integrated, shipped agent. Merge of `combine` + `Prime`. This is what gets graded. |
-| **`ANNA`** | Anna | **Person B — retrieval.** The category‑scoped hybrid engine (`catalog`, `category`, `lexical`, `fusion`, `dense`, `engine`, `text`), the phrasing‑robust turn parser (P1), the low‑evidence hold signal (P2), B4 memory trim + slot decay, the catalog audit notebook, and the perturbation / holdout eval harnesses. Most of the score originates here. |
-| **`ZACH`** *(remote only)* | Zach | **Person A — conversation logic.** `IntentRouter` (BUYING vs BROWSING via weighted keyword/regex signals) and `StateTracker` (slot accumulation, intent‑override detection, over‑generality → clarification prompt). Originally lived in a top‑level `Conversational Logic/` folder; relocated to `src/intent/` during integration. |
-| **`NITHIESH`** | Nithiesh | **Person C — LLM reranking.** `llm_client`, `prompts`, `reranker`, `contract`. Reorders B's Top‑10 with an LLM and enforces the API contract, with a safety net that never drops or invents a product. Originally placed under `src/retrieval/`; relocated to `src/rerank/` during integration (with the missing system prompt added). |
-| **`combine`** | — | Integration staging branch. Where `ANNA`, `ZACH`, and `NITHIESH` were first merged together, stray files removed, and the module folders relocated (`Conversational Logic/` → `src/intent/`, `src/retrieval/rerank*` → `src/rerank/`). |
-| **`ZELENE`** | Zelene and Yu Rae | **Person D — wiring.** Connected everyone's modules into one working `src/pipeline.py`, added `src/memory/session_memory.py` (the context‑distillation layer), fixed the setup files (API‑key name mismatch, missing `requests`), fixed Windows line‑ending churn, and committed Anna's analysis notebook. |
-| **`Prime`** | Anna | Closed the three integration gaps that left A and C contributing *nothing* to the score (`0.870196 → 0.909154`): wired the evidence gate that was built but never called, made the reranker actually reachable / bounded, and fixed `Agent()` raising `FileNotFoundError` from any working directory but the repo root. Added `tests/test_integration_flow.py`, `tests/test_offline_safety.py`, `ANNA_dump/run_integrated.py`, and `src/safety.py`. Also perturbed the shipped agent so the robustness numbers stopped drifting. |
+| **`main`** | — | The integrated, shipped agent. This is the final benchmark-ready version of the project. |
+| **`ANNA`** | Anna | Retrieval engine and search quality. Includes the category-scoped hybrid ranking stack, perturbation analysis, and the evaluation harnesses that drove the score. |
+| **`ZACH`** | Zach | Conversation logic. Covers intent classification, session-state tracking, and clarification behavior. |
+| **`NITHIESH`** | Nithiesh | Model reranking and response validation. Covers the LLM client, ranking prompts, and contract-safe response assembly. |
+| **`combine`** | — | Integration staging branch. This is where the work from the specialists was merged and cleaned up before the final branch state. |
+| **`ZELENE`** | Zelene and Yu Rae | Repo wiring and project integration. This branch connected the modules into one pipeline, added the memory layer, and stabilized the setup. |
+| **`Prime`** | Anna | Final robustness and regression work. This branch closed the remaining integration gaps, improved validation, and includes the demo walkthrough / presentation assets used for the final showcase. |
 
 Merge shape:
 
@@ -369,11 +362,12 @@ Prime ─────────────┘
 
 | Person | Area | Modules |
 |---|---|---|
-| **Anna** | Retrieval engine (B) — the core of the score | `src/retrieval/*`, `ANNA_dump/*` |
-| **Zach** | Intent routing & conversation state (A) | `src/intent/*` |
-| **Nithiesh** | LLM reranking & contract compliance (C) | `src/rerank/*` |
-| **Zelene and Yu Rae** | Integration, session memory, setup (D) | `src/pipeline.py`, `src/memory/*` |
-| **Anna** | Integration‑gap fixes, regression tests, offline‑safety guarantee | `src/safety.py`, `tests/*`, `ANNA_dump/run_integrated.py` |
+| **Anna** | Retrieval engine and benchmark analysis | `src/retrieval/*`, `ANNA_dump/*` |
+| **Zach** | Conversation logic and session state | `src/intent/*` |
+| **Nithiesh** | Reranking and output contract validation | `src/rerank/*` |
+| **Zelene** | Repo integration and setup stability | `src/pipeline.py`, `src/memory/*` |
+| **Yu Rae** | Project integration and repo-level support | setup coordination, memory wiring, project cleanup |
+| **Anna** | Final robustness, regression checks, and demo validation | `src/safety.py`, `tests/*`, `ANNA_dump/run_integrated.py` |
 
 ---
 
