@@ -519,3 +519,152 @@ WHAT IS ACTUALLY LEFT FOR B, ranked by honest expected value:
   Honest summary: B is close to its ceiling. Items 2-4 together are worth maybe
   +0.02, and item 1 is worth nothing on the scoreboard but protects the whole
   result. The remaining large gain (+0.045 MRR) sits with Person C.
+
+=========================================================================
+BOARD REVIEW: re-read the spec and submission rules. Findings for the team.
+=========================================================================
+
+R1. NETWORK MAY BE OFF AT FINAL SCORING. Biggest risk on the board.
+    submission_rules.md: "For official final scoring, organizer policy may
+    disable network access." And: "The organizer reserves the right to run your
+    submission under CPU, memory, timeout, and network restrictions."
+    Person C's entire task (C1/C2/C3 LLM semantic reranking) needs an LLM API.
+    If the graded run has no network, that component returns nothing and, worse,
+    may raise. The spec also says "Exceptions, invalid output, and timeouts may
+    count as a miss", so a failing LLM call does not degrade us gracefully, it
+    can zero out sessions.
+    The rules explicitly ask: "if your system has an offline fallback, describe
+    it" and "if your system cannot run without live credentials, say so".
+    OUR OFFLINE FALLBACK ALREADY EXISTS AND IS MEASURED. The retrieval engine is
+    fully offline: no API, no model download, 0 prompt/completion tokens, 226MB
+    resident, 11.3s build, 1.6s for 200 sessions, technical 0.9092. That is not
+    a degraded mode, it is the current headline number.
+    ACTION FOR THE TEAM: the integrated agent must never let an LLM failure
+    propagate. Wrap every model call, fall back to the retrieval ranking, and
+    declare the offline path in the report. This is a submission-validity issue,
+    not an optimisation.
+
+R2. THE SCORE IS NOT THE WHOLE JUDGING.
+    competition_specification.md: "TechnicalScore is an objective input to the
+    Technical Execution assessment. It is not a separate judging criterion and
+    does not represent the entire Technical Execution score."
+    We are optimising one input to one criterion. The report, the innovation
+    story and the demonstrated session carry weight we have not touched.
+
+R3. THE SPEC ANTICIPATES PARAPHRASING. P1 was not speculative.
+    "If natural-language paraphrasing is added by the organizer, it cannot
+    decide correctness." The organizer explicitly reserves the right to reword
+    the simulator. Our pre-P1 engine scored 0.0000 under rewording. This was a
+    live risk named in the spec, not a hypothetical we invented.
+
+R4. NO API CONTRACT VALIDATOR EXISTS. Task C4, unstarted.
+    "Exceptions, invalid output, and timeouts may count as a miss." One malformed
+    response costs a whole session. docs/agent_api_contract.json is sitting there
+    unused. A validator that checks every respond() against it is ~40 lines and
+    protects all four of us.
+
+R5. REQUIRED DISCLOSURES NOBODY HAS GATHERED.
+    Both docs require: latency, token usage, estimated model cost, whether
+    network is needed, exact Python version, dependency install steps, and one
+    command to run in the official harness. Recommended layout is
+    submission/agent.py + requirements.txt + README.md + src/. None of this
+    exists yet. D4/D5 territory, currently unstarted.
+    B can supply its half today: offline, 0 tokens, $0 model cost, 11.3s index
+    build, 1.6s per 200 sessions, 226MB resident, Python 3.10, numpy only
+    (sklearn and faiss optional and unused by default).
+
+R6. user_profile IS NOISE. Measured, so nobody wastes time on it.
+    "Safe personalization using the aggregate profile" is a named innovation
+    direction, and the profile is currently unused by everyone. Checked whether
+    it predicts anything about the target:
+      overall target average_rating           4.372
+      users whose own prior rating is 5.0     4.413  (n=134)
+      users whose own prior rating is 1.0     4.393  (n=14)
+      by preference tag, every subgroup       4.32 - 4.38
+      purchase_frequency                      identical for all 200 sessions
+    No separation anywhere. The profile cannot move the score. It can still
+    legitimately serve the "transparent recommendation explanations" direction,
+    i.e. wording, not ranking. Worth saying that explicitly in the report rather
+    than quietly ignoring the field.
+
+R7. RESOURCE LIMITS ARE NOW A SELLING POINT, NOT JUST HYGIENE.
+    "CPU, memory, timeout, and network restrictions." B4's trim (536MB -> 226MB,
+    no GPU, no network, no model download) is directly responsive to a stated
+    organizer right. Worth a line in the report.
+
+=========================================================================
+OVERFITTING CHECK (ANNA_dump/holdout.py)
+=========================================================================
+
+Every weight and threshold was chosen by looking at the same 200 public
+sessions; the graded set is 800 private ones. Split the public set into two
+stratified halves (scenario mix preserved), swept a 54-config grid over the
+knobs that were actually tuned (phrase weight, category weight, gate words,
+gate turn cap), and compared in-sample best against held-out.
+
+                          tuned on A   held out B      gap   config
+  best config on A            0.8966       0.9254   +0.0288  (1.0, 0.2, 6, 2)
+  best config on B            0.9381       0.8944   -0.0437  (2.0, 0.2, 4, 3)
+  SHIPPED config              0.8923       0.9260   +0.0338  (1.0, 0.4, 4, 3)
+
+  optimism (best-on-fold minus shipped, same fold):  A +0.0043   B +0.0121
+  shipped config rank:  10/54 on fold A,  12/54 on fold B
+  spread across all 54 configs:  A range 0.0498,  B range 0.0402
+
+VERDICT: the tuning is NOT badly overfitted, and this is the good news.
+  1. The shipped config lands in the top 20% on BOTH folds independently. An
+     overfitted config would look great on one and mediocre on the other. The
+     fold-specific winners do exactly that: the best-on-B config drops 0.0437
+     when moved to A.
+  2. Tuning optimism is only +0.004 to +0.012. That is the amount we would be
+     flattering ourselves by, and it is small.
+  3. Fold-to-fold variance dwarfs it. The SAME config scores 0.8923 on one half
+     and 0.9260 on the other, a 0.034 swing from sampling alone on n=100. On 800
+     private sessions that noise shrinks by roughly sqrt(8), to about 0.012.
+  4. The whole 54-config grid spans only ~0.045. Even the worst parameter set in
+     the grid scores 0.847/0.898. So almost none of our 0.78 gain over baseline
+     comes from tuning; it comes from the architecture. That is the defensible
+     version of the story and it is now evidenced, not asserted.
+
+  HONEST PRIVATE-SET ESTIMATE: roughly 0.88 to 0.92, assuming the private set is
+  generated the same way the spec says it is. Report 0.9092 with that interval
+  attached rather than as a point estimate.
+
+  WHAT THIS DOES NOT TEST: only the four tuned parameters. Structural choices
+  (category scoping, RRF, the parser design) were also made while looking at the
+  public evaluator. Those are mechanism rather than parameters, and the spec says
+  the private sessions are generated the same way, but it is not proof. P1's
+  paraphrase robustness is the mitigation there, and it is the reason to keep
+  quoting the perturbed 0.9045 rather than the clean number.
+
+=========================================================================
+OFFLINE SAFETY: what is and is NOT guaranteed today
+=========================================================================
+
+Audited every import on the retrieval path. catalog, category, engine, fusion,
+lexical and text import only json, pathlib, re, dataclasses, collections and
+numpy. No network, no model, no API. The engine itself is genuinely offline.
+
+But the SUBMISSION is not guaranteed offline, for five reasons:
+
+  O1. Our code is not what gets graded. The entry point is starter/agent.py.
+      src/retrieval is currently reachable only through our own harness in
+      ANNA_dump. Until D1 wires it in, the submission does not use it at all,
+      so "does my engine work offline" is moot.
+  O2. requirements.txt declares sentence-transformers, faiss-cpu, scikit-learn
+      and openai. The offline path needs numpy alone. In a restricted grading
+      environment that file is both a failure risk and a signal to the organizer
+      that we need network.
+  O3. dense.py can reach huggingface.co via SentenceTransformer. The import is
+      lazy and only fires on backend="st", which is not the default, but nothing
+      structurally prevents it being switched on.
+  O4. Nothing forces a downstream LLM failure to degrade instead of raise. When
+      C's reranker lands, one unguarded API call in respond() is an exception,
+      and the spec says exceptions may count as a miss. There is no wrapper
+      enforcing "if anything fails, fall back to the retrieval ranking".
+  O5. It is untested. No test disables network and asserts the agent still
+      produces valid output at full score. Believing is not guaranteeing.
+
+  A GUARANTEE would be: a minimal offline requirements set, a fallback wrapper
+  that catches everything downstream of retrieval, a test that runs with network
+  blocked and asserts the score, and a written declaration in the report.
