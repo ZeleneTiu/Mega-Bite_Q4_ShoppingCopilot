@@ -668,3 +668,76 @@ But the SUBMISSION is not guaranteed offline, for five reasons:
   A GUARANTEE would be: a minimal offline requirements set, a fallback wrapper
   that catches everything downstream of retrieval, a test that runs with network
   blocked and asserts the score, and a written declaration in the report.
+
+=========================================================================
+OFFLINE GUARANTEE: built (was O4 + O5 in the audit above)
+=========================================================================
+
+Why this matters more than it sounds. The evaluator already wraps respond():
+
+    try:    response = agent.respond(...)
+    except: response = {"message":"", "ask_attribute":None, "recommendations":[]}
+
+So an exception does NOT crash the run. It silently substitutes an EMPTY
+recommendation list for that turn. If the failure is systemic, e.g. no network,
+that happens on every turn of every session and the score goes to roughly zero
+with no error visible anywhere in the output. That is the failure mode to fear:
+silent, total, and indistinguishable from bad retrieval.
+
+Shipped:
+
+  src/safety.py  (stdlib only, no third-party imports at all)
+    validate_response()  checks a turn against docs/agent_api_contract.json and
+                         RETURNS the violations rather than raising, so callers
+                         can log what was wrong and still serve something.
+                         This is task C4's compliance check, unstarted until now.
+    coerce_response()    repairs what can be repaired: drops duplicate and
+                         malformed recommendations, nulls a disallowed
+                         ask_attribute, fixes usage counts.
+    ResilientAgent       the seatbelt. Computes the offline retrieval answer
+                         FIRST and unconditionally, then tries the optional
+                         enhancement layer (C's reranker, A's generated
+                         message). If that raises, times out, or returns
+                         something the contract rejects, the baseline is served
+                         and the session continues. Failures are recorded, not
+                         hidden, via failure_summary() for the report.
+                         Timeout is enforced on a worker thread because the spec
+                         counts timeouts as misses and a hung API call costs
+                         exactly as much as a failed one.
+
+  tests/test_offline_safety.py  (stdlib unittest, matching the repo's existing
+                                 style; pytest is not installed and is not
+                                 needed)
+    - full 200-session evaluation with sockets blocked, asserts technical >=0.85
+      and asserts reported token usage is exactly 0
+    - every turn of 40 sessions validated against the contract, not just one
+    - an enhancer that always raises: score must hold, failure must be recorded
+    - an enhancer returning rubbish: must be rejected, valid output still served
+    - an enhancer that hangs 30s with a 0.5s budget: must time out fast
+    - an import guard so a future `import openai` in the retrieval path fails
+      here rather than silently in the graded run
+
+  requirements-offline.txt   numpy. That is the entire offline dependency set.
+
+NEGATIVE CONTROLS RUN, because a test that cannot fail is worthless:
+  - inside the block: socket.socket, socket.create_connection and
+    urllib.urlopen all raise. Outside it, urlopen returns 200. So the block is
+    doing the work, not a pre-existing outage.
+  - planted `import openai` into fusion.py: the import guard CAUGHT it. File
+    restored and verified.
+  Full suite: 9 tests (6 new + 3 existing evaluator tests), all pass, 37s.
+
+WHAT THE TEAM CAN NOW SAY IN THE REPORT, as fact rather than hope:
+  "The system runs fully offline. No network, no model download, no API
+   credentials, no GPU. Dependencies: numpy. Reported token usage: 0.
+   Estimated model cost: $0. Index build 11.3s, 200 sessions in 1.6s, 226MB
+   resident, Python 3.10. Technical score under a network-disabled run: 0.9092,
+   verified by tests/test_offline_safety.py. LLM enhancement is optional and
+   wrapped: any failure, malformed output or timeout degrades to the offline
+   ranking rather than losing the session."
+
+HANDOVER TO PERSON D (D1): wrap the integrated agent in ResilientAgent rather
+than calling C's reranker directly. It is about three lines at the integration
+point and it converts the worst case from ~0 to 0.9092.
+HANDOVER TO PERSON C (C4): validate_response() is the contract check your task
+asks for. Call it in your own tests; it returns a list of problems.
