@@ -168,8 +168,21 @@ class SearchEngine:
         return self._states.setdefault(session_id, SessionState())
 
     # ------------------------------------------------------------------
-    def observe(self, session_id: str, message: str) -> SessionState:
-        """Fold one customer turn into the session state."""
+    def observe(self, session_id: str, message: str,
+                constraints: dict | None = None) -> SessionState:
+        """Fold one customer turn into the session state.
+
+        ``constraints`` is Person A's parsed slot dict (IntentRouter's
+        ``detected_constraints``). It is a HINT and additive only: its textual
+        values join the phrase-evidence candidates, and phrase evidence scores
+        a document only when the phrase actually occurs in it, so a wrong or
+        redundant slot costs one lookup and nothing else.
+
+        It deliberately does NOT touch the BM25 query or the evidence-word
+        count. Both feed the hold gate, and A's regexes are tuned for intent
+        classification rather than recall, so letting them move the gate would
+        make the hold decision depend on a second, differently-tuned parser.
+        """
         state = self.state(session_id)
         state.turn += 1
         is_override = bool(_OVERRIDE_RE.search(message))
@@ -196,6 +209,14 @@ class SearchEngine:
             # revocation is honoured at ranking time is a separate switch.
             state.overridden_before = len(state.constraints)
 
+        # A's slots ride along as extra phrase candidates. Done before the
+        # empty-turn return so a turn B reads as contentless can still carry
+        # a slot A recognised.
+        if constraints:
+            for value in self._router_phrases(constraints):
+                if value not in state.phrases:
+                    state.phrases.append(value)
+
         if _EMPTY_TURN_RE.search(message):
             return state
 
@@ -208,6 +229,24 @@ class SearchEngine:
             if value not in state.phrases:
                 state.phrases.append(value)
         return state
+
+    @staticmethod
+    def _router_phrases(constraints: dict) -> list[str]:
+        """Textual slot values from A's router, as phrase-evidence candidates.
+
+        Numeric slots (price_max, price_min, min_rating) are skipped on
+        purpose: they are filters rather than text, and B4 measured price as
+        carrying no usable signal on this catalog (null on a large share of
+        items, and absent from 0 of 200 public sessions).
+        """
+        out: list[str] = []
+        for value in constraints.values():
+            if not isinstance(value, str):
+                continue
+            value = value.strip()
+            if len(value) >= 3:
+                out.append(value)
+        return list(dict.fromkeys(out))
 
     @classmethod
     def _extract_constraints(cls, message: str, category_label: str | None = None) -> list[str]:
