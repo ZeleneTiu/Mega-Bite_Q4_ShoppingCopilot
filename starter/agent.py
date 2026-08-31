@@ -1,4 +1,4 @@
-"""Integrated agent: thin adapter over src/pipeline.py (Person D owns this file).
+"""Integrated agent: thin adapter over src/pipeline.py.
 
 The evaluator imports THIS Agent class and calls reset()/respond(). All real
 logic lives in the pipeline; this file only adapts the contract and guarantees

@@ -109,7 +109,6 @@ class Pipeline:
             "store": cat.stores[doc_id],
             "price": None if math.isnan(price) else price,
             "categories": list(cat.category_paths[doc_id]),
-            "details": cat.fields["details"][doc_id],
         }
 
     @staticmethod
