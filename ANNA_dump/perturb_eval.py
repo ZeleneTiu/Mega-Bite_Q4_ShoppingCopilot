@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
+import zlib
 import sys
 import time
 from pathlib import Path
@@ -106,7 +108,77 @@ def make_terse():
     return initial_message, customer_reply, override_message
 
 
-STYLES = {"clean": None, "natural": make_natural, "terse": make_terse}
+# ---------------------------------------------------------------------------
+# The three styles above reword the WRAPPER but quote each constraint
+# verbatim, because that is what the organiser's own simulator does. They
+# therefore prove the parser is not template-bound -- and prove nothing about
+# what happens if the organiser paraphrases the constraint TEXT.
+#
+# That distinction matters here more than anywhere else: the intent card is
+# built from the product's own `features` and `details`
+# (local_evaluator.py:57), and removing `features` from the index costs 0.441
+# technical. The whole score rests on lexical overlap with those fields, so
+# the honest stress test is one that breaks the overlap itself.
+#
+# paraphrase()  swaps common descriptors for wordier equivalents and drops a
+#               quarter of the remaining words, deterministically.
+# hostile       applies that on top of the terse wrapper: no marker phrases,
+#               no verbatim constraint, nothing to match on but leftovers.
+
+_SYNONYMS = {
+    "waterproof": "water resistant", "breathable": "lets air through",
+    "lightweight": "light and easy to carry", "durable": "built to last",
+    "adjustable": "can be adjusted", "comfortable": "comfy",
+    "hypoallergenic": "kind to sensitive skin", "elastic": "stretchy",
+    "zipper": "zip fastening", "pockets": "pouches", "hood": "hooded part",
+    "sleeve": "arm section", "stainless": "rust free", "sterling": "solid",
+    "genuine": "real", "machine": "in the washer", "washable": "can be washed",
+    "insulated": "keeps warmth in", "cushioned": "padded underfoot",
+    "leather": "hide material", "cotton": "soft woven fabric",
+}
+
+
+def paraphrase(text: str, seed: int, drop: float = 0.25) -> str:
+    """Reword a constraint so its exact wording no longer matches the catalog."""
+    rng = random.Random(seed)
+    words = str(text).split()
+    out: list[str] = []
+    for word in words:
+        key = word.lower().strip(".,;:()")
+        if key in _SYNONYMS:
+            out.extend(_SYNONYMS[key].split())
+        elif rng.random() >= drop:
+            out.append(word)
+    return " ".join(out) or str(text)
+
+
+def make_paraphrase(drop=0.25, terse=False):
+    base_initial, base_reply, base_override = (
+        make_terse() if terse else make_natural()
+    )
+
+    def initial_message(sample, category, disclosed):
+        text = base_initial(sample, category, disclosed)
+        # zlib.crc32, not hash(): Python randomises str hashing per process, so
+        # hash() made these styles produce a different score on every run. A
+        # robustness harness whose numbers move on their own is worse than none.
+        seed = zlib.crc32(str(sample["sample_id"]).encode()) & 0xFFFF
+        return paraphrase(text, seed=seed, drop=drop)
+
+    def customer_reply(sample, ask_attribute, disclosed, boundary_used):
+        text, boundary_used = base_reply(sample, ask_attribute, disclosed, boundary_used)
+        return paraphrase(text, seed=len(disclosed) * 7 + 3, drop=drop), boundary_used
+
+    return initial_message, customer_reply, base_override
+
+
+STYLES = {
+    "clean": None,
+    "natural": make_natural,
+    "terse": make_terse,
+    "paraphrase": lambda: make_paraphrase(drop=0.25, terse=False),
+    "hostile": lambda: make_paraphrase(drop=0.40, terse=True),
+}
 
 
 def apply_style(name: str) -> None:
@@ -134,21 +206,35 @@ def apply_style(name: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--styles", default="clean,natural,terse")
+    parser.add_argument("--styles", default="clean,natural,terse,paraphrase,hostile")
     parser.add_argument("--catalog", default="data/catalog.jsonl")
     parser.add_argument("--dataset", default="data/public_set.jsonl")
+    parser.add_argument(
+        "--integrated", action="store_true",
+        help="Perturb the SHIPPED pipeline (starter.agent.Agent) instead of the "
+             "retrieval-only harness agent. The private set is scored against "
+             "the shipped agent, so this is the run that actually matters; the "
+             "retrieval-only default stays for attributing a drop to B alone.",
+    )
+    parser.add_argument("--output", default="ANNA_dump/robustness.json")
     args = parser.parse_args()
 
     samples = ev.load_jsonl(args.dataset)
     ids, cats, prods = ev.catalog_index(args.catalog)
-    agent = Agent(args.catalog)
+    if args.integrated:
+        from starter.agent import Agent as IntegratedAgent  # noqa: PLC0415
+        agent = IntegratedAgent(args.catalog)
+        clear_states = agent.pipeline.engine._states.clear
+    else:
+        agent = Agent(args.catalog)
+        clear_states = agent.engine._states.clear
 
     print(f"{'style':<10} {'hit@10':>8} {'mrr':>8} {'mttc':>7} {'technical':>10}")
     results = {}
     for style in args.styles.split(","):
         style = style.strip()
         apply_style(style)
-        agent.engine._states.clear()
+        clear_states()
         started = time.time()
         r = ev.evaluate(agent, samples, ids, cats, prods)
         results[style] = {k: r[k] for k in
@@ -156,7 +242,7 @@ def main() -> None:
         print(f"{style:<10} {r['hit_rate_at_10']:>8.4f} {r['mrr']:>8.4f} "
               f"{r['mttc']:>7.2f} {r['recommended_technical_score']:>10.4f}"
               f"   ({time.time()-started:.1f}s)", flush=True)
-    Path("ANNA_dump/robustness.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    Path(args.output).write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

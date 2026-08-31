@@ -12,6 +12,7 @@ Both directions are run, because a single split is itself a sample.
 from __future__ import annotations
 
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -80,8 +81,14 @@ def main() -> None:
         return r["recommended_technical_score"]
 
     scores = {}
-    for config in GRID:
+    started = time.time()
+    for index, config in enumerate(GRID, 1):
         scores[config] = (run(config, fold_a), run(config, fold_b))
+        elapsed = time.time() - started
+        print("\r  config %d/%d  %.0fs elapsed, ~%.0fs left   " % (
+            index, len(GRID), elapsed, elapsed / index * (len(GRID) - index)),
+            end="", file=sys.stderr, flush=True)
+    print("\r" + " " * 60 + "\r", end="", file=sys.stderr, flush=True)
 
     print(f"{'':<26}{'tuned on A':>12}{'held out B':>12}{'gap':>9}")
     best_a = max(GRID, key=lambda c: scores[c][0])
