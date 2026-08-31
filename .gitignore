@@ -17,3 +17,8 @@ tests/test_5core_builder.py
 tests/test_organizer_pipeline.py
 *.log
 .venv/
+
+# Local scratch
+.claude/
+ANNA_dump/__pycache__/
+ANNA_dump/cache/

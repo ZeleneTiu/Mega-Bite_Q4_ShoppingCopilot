@@ -1,0 +1,32 @@
+{
+  "clean": {
+    "hit_rate_at_10": 0.985,
+    "mrr": 0.836181,
+    "mttc": 2.71,
+    "recommended_technical_score": 0.909154
+  },
+  "natural": {
+    "hit_rate_at_10": 0.985,
+    "mrr": 0.812228,
+    "mttc": 2.585,
+    "recommended_technical_score": 0.904468
+  },
+  "terse": {
+    "hit_rate_at_10": 0.985,
+    "mrr": 0.837514,
+    "mttc": 2.71,
+    "recommended_technical_score": 0.909554
+  },
+  "paraphrase": {
+    "hit_rate_at_10": 0.71,
+    "mrr": 0.523696,
+    "mttc": 4.88,
+    "recommended_technical_score": 0.634509
+  },
+  "hostile": {
+    "hit_rate_at_10": 0.605,
+    "mrr": 0.428685,
+    "mttc": 5.885,
+    "recommended_technical_score": 0.533405
+  }
+}

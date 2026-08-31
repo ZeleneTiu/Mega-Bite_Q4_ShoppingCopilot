@@ -1,0 +1,55 @@
+diff --git a/src/retrieval/catalog.py b/src/retrieval/catalog.py
+index 3c849e0..270930f 100644
+--- a/src/retrieval/catalog.py
++++ b/src/retrieval/catalog.py
+@@ -60,6 +60,9 @@ class Catalog:
+         # NaN where the source price is null. Never used as a hard filter.
+         self.prices: np.ndarray = np.zeros(0, dtype=np.float32)
+         self.asin_to_id: dict[str, int] = {}
++        # Set by compact(): one joined string per document, replacing the
++        # six per-field lists once the indexes no longer need them.
++        self._combined: list[str] | None = None
+ 
+     # ------------------------------------------------------------------
+     @classmethod
+@@ -91,8 +94,40 @@ class Catalog:
+ 
+     def document_text(self, doc_id: int) -> str:
+         """Full normalised text of one document, for phrase containment."""
++        if self._combined is not None:
++            return self._combined[doc_id]
+         return " ".join(self.fields[name][doc_id] for name in INDEXED_FIELDS)
+ 
++    def compact(self) -> None:
++        """Drop per-field text once the indexes that need it are built. (B4)
++
++        After construction only two consumers remain: phrase evidence wants
++        the whole document as one string, and the category ranker wants the
++        category path. Holding six separate strings per document serves
++        neither, costs six times the per-string overhead, and forces a join
++        on every phrase lookup. Collapsing to one combined string plus the
++        category text is both smaller and faster on the hot path.
++
++        Safe to call only after LexicalIndex and CategoryIndex exist; the
++        raw category path list is preserved, so scoping still works.
++        """
++        if self._combined is not None:
++            return
++        # Keep the category text, which the category ranker still needs.
++        categories = list(self.fields["categories"])
++        sources = [self.fields[name] for name in INDEXED_FIELDS]
++        combined: list[str] = []
++        for doc_id in range(self.size):
++            combined.append(" ".join(source[doc_id] for source in sources))
++            # Release each original string as it is consumed. Building the
++            # joined list while the originals are all still referenced
++            # spikes resident memory by ~40MB and the allocator does not
++            # hand it back, so the naive version made things worse.
++            for source in sources:
++                source[doc_id] = ""
++        self._combined = combined
++        self.fields = {"categories": categories}
++
+     def coarse_category(self, doc_id: int) -> str:
+         """The category label the customer simulator will actually say.
+ 
