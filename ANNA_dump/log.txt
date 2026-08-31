@@ -741,3 +741,25 @@ than calling C's reranker directly. It is about three lines at the integration
 point and it converts the worst case from ~0 to 0.9092.
 HANDOVER TO PERSON C (C4): validate_response() is the contract check your task
 asks for. Call it in your own tests; it returns a list of problems.
+
+=========================================================================
+COMMIT MESSAGE CONVENTION (Aadhavan's, adopted from here on)
+=========================================================================
+
+Prefix reflects the BULK of the change, not every part of it. One prefix per
+commit. Subject stays on one line.
+
+  add:       new file, new module, new capability that did not exist
+  edit:      behaviour or logic changed in an existing file
+  modified:  same file, non-behavioural change (rename, move, reformat,
+             comments, config, thresholds retuned without new logic)
+  rm:        deletion or removal
+  notes:     documentation, log entries, findings, analysis with no code change
+
+Body still carries the reasoning: what was measured, what was decided, why.
+That is what the report gets written from, and it is the only place the
+"why" survives once the hackathon is over.
+
+Example:
+  edit: fusion weights retuned after holdout check
+  notes: rank distribution analysis and remaining headroom
