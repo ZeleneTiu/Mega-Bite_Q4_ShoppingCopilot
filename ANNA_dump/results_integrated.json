@@ -1640,7 +1640,7 @@
   ],
   "_meta": {
     "label": "integrated",
-    "eval_seconds": 1.14,
+    "eval_seconds": 1.93,
     "rerank_stats": null
   }
 }
