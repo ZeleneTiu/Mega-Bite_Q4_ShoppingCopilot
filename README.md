@@ -350,8 +350,8 @@ provenance — the "why" lives in their commit bodies and in `ANNA_dump/log.txt`
 | **`ZACH`** *(remote only)* | Zach | **Person A — conversation logic.** `IntentRouter` (BUYING vs BROWSING via weighted keyword/regex signals) and `StateTracker` (slot accumulation, intent‑override detection, over‑generality → clarification prompt). Originally lived in a top‑level `Conversational Logic/` folder; relocated to `src/intent/` during integration. |
 | **`NITHIESH`** | Nithiesh | **Person C — LLM reranking.** `llm_client`, `prompts`, `reranker`, `contract`. Reorders B's Top‑10 with an LLM and enforces the API contract, with a safety net that never drops or invents a product. Originally placed under `src/retrieval/`; relocated to `src/rerank/` during integration (with the missing system prompt added). |
 | **`combine`** | — | Integration staging branch. Where `ANNA`, `ZACH`, and `NITHIESH` were first merged together, stray files removed, and the module folders relocated (`Conversational Logic/` → `src/intent/`, `src/retrieval/rerank*` → `src/rerank/`). |
-| **`ZELENE`** | Zelene | **Person D — wiring.** Connected everyone's modules into one working `src/pipeline.py`, added `src/memory/session_memory.py` (the context‑distillation layer), fixed the setup files (API‑key name mismatch, missing `requests`), fixed Windows line‑ending churn, and committed Anna's analysis notebook. |
-| **`Prime`** | Aadhavan | Closed the three integration gaps that left A and C contributing *nothing* to the score (`0.870196 → 0.909154`): wired the evidence gate that was built but never called, made the reranker actually reachable / bounded, and fixed `Agent()` raising `FileNotFoundError` from any working directory but the repo root. Added `tests/test_integration_flow.py`, `tests/test_offline_safety.py`, `ANNA_dump/run_integrated.py`, and `src/safety.py`. Also perturbed the shipped agent so the robustness numbers stopped drifting. |
+| **`ZELENE`** | Zelene and Yu Rae | **Person D — wiring.** Connected everyone's modules into one working `src/pipeline.py`, added `src/memory/session_memory.py` (the context‑distillation layer), fixed the setup files (API‑key name mismatch, missing `requests`), fixed Windows line‑ending churn, and committed Anna's analysis notebook. |
+| **`Prime`** | Anna | Closed the three integration gaps that left A and C contributing *nothing* to the score (`0.870196 → 0.909154`): wired the evidence gate that was built but never called, made the reranker actually reachable / bounded, and fixed `Agent()` raising `FileNotFoundError` from any working directory but the repo root. Added `tests/test_integration_flow.py`, `tests/test_offline_safety.py`, `ANNA_dump/run_integrated.py`, and `src/safety.py`. Also perturbed the shipped agent so the robustness numbers stopped drifting. |
 
 Merge shape:
 
@@ -372,8 +372,8 @@ Prime ─────────────┘
 | **Anna** | Retrieval engine (B) — the core of the score | `src/retrieval/*`, `ANNA_dump/*` |
 | **Zach** | Intent routing & conversation state (A) | `src/intent/*` |
 | **Nithiesh** | LLM reranking & contract compliance (C) | `src/rerank/*` |
-| **Zelene** | Integration, session memory, setup (D) | `src/pipeline.py`, `src/memory/*` |
-| **Aadhavan** | Integration‑gap fixes, regression tests, offline‑safety guarantee | `src/safety.py`, `tests/*`, `ANNA_dump/run_integrated.py` |
+| **Zelene and Yu Rae** | Integration, session memory, setup (D) | `src/pipeline.py`, `src/memory/*` |
+| **Anna** | Integration‑gap fixes, regression tests, offline‑safety guarantee | `src/safety.py`, `tests/*`, `ANNA_dump/run_integrated.py` |
 
 ---
 
