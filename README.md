@@ -362,12 +362,11 @@ Prime ─────────────┘
 
 | Person | Area | Modules |
 |---|---|---|
-| **Anna** | Retrieval engine and benchmark analysis | `src/retrieval/*`, `ANNA_dump/*` |
+| **Anna** | Retrieval engine and benchmark analysis, Final robustness, regression checks, and demo validation | `src/retrieval/*`, `ANNA_dump/*`, `src/safety.py`, `tests/*`, `ANNA_dump/run_integrated.py` |
 | **Zach** | Conversation logic and session state | `src/intent/*` |
 | **Nithiesh** | Reranking and output contract validation | `src/rerank/*` |
 | **Zelene** | Repo integration and setup stability | `src/pipeline.py`, `src/memory/*` |
 | **Yu Rae** | Project integration and repo-level support | setup coordination, memory wiring, project cleanup |
-| **Anna** | Final robustness, regression checks, and demo validation | `src/safety.py`, `tests/*`, `ANNA_dump/run_integrated.py` |
 
 ---
 
