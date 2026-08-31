@@ -421,3 +421,101 @@ STATE AFTER P3:
                      -> 0.9092 (evidence gate) -> 0.9092 (B4, score-neutral)
 
 Remaining: P4 price hedge, the last item.
+
+=========================================================================
+CURRENT METRICS  (v7, after P1+P2+P3)
+=========================================================================
+
+                      baseline      ours     delta
+  hit_rate@10           0.1250    0.9850   +0.8600
+  mrr                   0.0680    0.8362   +0.7681
+  mttc                  9.8100    2.7100   -7.1000
+  efficiency            0.1190    0.8290   +0.7100
+  technical_score       0.1067    0.9092   +0.8024
+
+  by scenario           n     hit     mrr    mttc
+    boundary           10   1.000   0.950    3.60
+    browsing           80   0.988   0.825    2.61
+    buying             80   0.988   0.827    2.27
+    intent_override    30   0.967   0.853    3.83
+
+  by phrasing (robustness harness)
+    clean                   0.9850  0.8362   0.9092
+    natural                 0.9850  0.8122   0.9045
+    terse                   0.9850  0.8375   0.9096
+  QUOTE 0.9045 AS THE HEADLINE. Clean is measured on wording we were handed;
+  the worst perturbed style is the honest estimate for the 800 private sessions.
+
+  system            build 11.3s | 200-session eval 1.6s | 226MB resident
+  score history     0.1067 -> 0.7959 (B1+scoping) -> 0.8569 (B3 RRF)
+                    -> 0.8732 (weights) -> 0.8702 (P1 robustness)
+                    -> 0.9092 (P2 evidence gate) -> 0.9092 (P3 B4, score-neutral)
+
+=========================================================================
+HEADROOM ANALYSIS: what is actually left, and who owns it
+=========================================================================
+
+Rank distribution now (was 53% at rank 1 before the evidence gate):
+    rank 1     150  (75.0%)
+    rank 2      23  (11.5%)
+    rank 3      11  ( 5.5%)
+    rank 4-10   13  ( 6.5%)
+    missed       3  ( 1.5%)
+
+Remaining technical-score points, by metric:
+    mrr          +0.045   (if every found item reached rank 1)
+    efficiency   +0.034   (if mttc reached 1.0, i.e. always right on turn 1)
+    hit rate     +0.008   (the 3 misses)
+  MRR and efficiency are in direct tension: the evidence gate buys one with the
+  other. They cannot both be fully claimed.
+
+FINDING 1: score-based confidence is a dead end. Tested whether anything at
+turn 1 predicts "the target is already rank 1" (true for only 15.5% of sessions):
+    signal            rank1 median   not-rank1 median   separation
+    top1/top2 ratio          1.067              1.025      1.04x   useless
+    gap to #5                0.109              0.091      1.20x   weak
+    evidence words           3                  0           inf    already used
+    pool size               88                230          2.6x    unused
+  This explains why the early margin-based gate collapsed to 0.72. A threshold on
+  top1/top2 answers with 24% precision against a 15.5% base rate: barely better
+  than guessing. Pool size is the only unused signal with real separation.
+
+FINDING 2: the rank 2-3 band is mostly NOT B's to fix. Replayed all 34 sessions
+and inspected what outranks the target. Only 6 of 34 are beaten by a near
+duplicate title (>0.60 similarity). The other 28 are beaten by genuinely
+different products that match the stated words equally well:
+    target "Casio Men's Wrist Watch AQ-800E-7A"
+      beaten by "Olmeca Men's Casual Simple Dress Watch Analog Quartz"
+    target "Amazon Essentials Women's Lace-Up Combat Boot"
+      beaten by "Pleaser Women's STPLASH1018 Boot"
+  Both are correct answers to the words the customer said. Separating them needs
+  judgment about which product the person actually meant, which is precisely
+  task C2. Most of the +0.045 MRR headroom belongs to Person C, not to retrieval.
+
+WHAT IS ACTUALLY LEFT FOR B, ranked by honest expected value:
+
+  1. VALIDATE AGAINST OVERFITTING. Zero score gain, highest real value.
+     Every weight, threshold and switch here was tuned on the same 200 public
+     sessions, and the graded set is 800 private ones. A held-out split (tune on
+     100, measure on 100) would tell us how much of 0.9092 is real and how much
+     is fitted to this sample. Right now we do not know, and that is the single
+     largest uncertainty in the number we are about to report.
+
+  2. NEAR-DUPLICATE SUPPRESSION. Up to +0.008 technical.
+     6 of 34 rank-2-3 cases. Small, real, and cleanly inside B's remit.
+
+  3. SELECTIVE GATE USING POOL SIZE. Maybe +0.010 technical.
+     Answer immediately when the pool is tight and evidence exists, hold only
+     otherwise. Recovers some efficiency without giving back MRR. The only
+     unused predictive signal we found.
+
+  4. THE 3 MISSES. Max +0.008, and they look genuinely hard: all three sit in
+     large generic buckets (Blouses & Button-Downs, Casual Button-Down Shirts,
+     Down Jackets & Parkas) where the target is one of hundreds of similar items.
+
+  5. P4 PRICE HEDGE. Measured value on everything observable: zero.
+     Pure insurance against private intent cards mentioning budget.
+
+  Honest summary: B is close to its ceiling. Items 2-4 together are worth maybe
+  +0.02, and item 1 is worth nothing on the scoreboard but protects the whole
+  result. The remaining large gain (+0.045 MRR) sits with Person C.
