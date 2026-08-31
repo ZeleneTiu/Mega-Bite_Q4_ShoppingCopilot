@@ -16,6 +16,8 @@ from src.retrieval.engine import SearchEngine
 class Agent:
     # Overridden by run_eval.py so the ask policy can be ablated.
     ASK: str | None = "other"
+    # Toggled off by run_eval --no-hold to isolate the gate's contribution.
+    HOLD: bool = True
 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl",
                  enable_dense: bool = False, **kwargs) -> None:
@@ -32,6 +34,10 @@ class Agent:
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         self.engine.observe(session_id, user_message)
         ranked = self.engine.search(session_id, top_k)
+        # Placeholder for Person A's guidance policy: when the evidence is
+        # too thin to rank confidently, ask rather than guess.
+        if self.HOLD and self.engine.should_hold(session_id, turn):
+            ranked = []
         return {
             "message": "Here are the closest matches I found.",
             # Placeholder policy, handed to Person A/C. See run_eval.py notes.

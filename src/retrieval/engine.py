@@ -239,6 +239,50 @@ class SearchEngine:
         return list(dict.fromkeys(preferred)), list(dict.fromkeys(candidates))
 
     # ------------------------------------------------------------------
+    def evidence_words(self, session_id: str) -> int:
+        """How many distinct informative words the customer has given us.
+
+        Measured in words rather than in constraint segments on purpose.
+        Segment counts move with phrasing ("leather and 100% Leather" is one
+        segment conversationally and two tersely), and the whole point of
+        the P1 work was that behaviour must not depend on wording. Word
+        counts are stable across all three tested phrasings.
+        """
+        state = self.state(session_id)
+        words: set[str] = set()
+        for value in state.active_constraints(self.drop_overridden):
+            words.update(tokenise(value))
+        return len(words)
+
+    def should_hold(
+        self,
+        session_id: str,
+        turn: int,
+        min_words: int = 4,
+        max_hold_turn: int = 3,
+    ) -> bool:
+        """Suggest withholding recommendations and asking a question instead.
+
+        This is a SIGNAL, not a policy. Person A owns the decision (tasks A3
+        over-generality detection and A4 proactive guidance); retrieval is
+        simply the layer that can see how thin the evidence is, so it
+        reports that rather than guessing on A's behalf.
+
+        Why holding pays: answering a vague first turn tends to place the
+        target around rank 2, which ends the session at reciprocal rank 0.5.
+        Asking once more and answering at rank 1 scores 1.0. The extra turn
+        costs efficiency, but efficiency carries weight 0.2 against MRR's
+        0.3, so the trade is favourable. Measured on the public set:
+        technical 0.8702 -> 0.9092, MRR 0.6727 -> 0.8362, with hit rate
+        unchanged at 0.985.
+
+        ``max_hold_turn`` is the safety net. Hit rate is weighted 0.5, so
+        the agent must never keep stalling in pursuit of a better rank;
+        past this turn it answers with whatever it has.
+        """
+        return turn <= max_hold_turn and self.evidence_words(session_id) < min_words
+
+    # ------------------------------------------------------------------
     def search(self, session_id: str, top_k: int = 10) -> list[tuple[str, float]]:
         """Rank candidates for the current state. Returns (asin, score)."""
         state = self.state(session_id)

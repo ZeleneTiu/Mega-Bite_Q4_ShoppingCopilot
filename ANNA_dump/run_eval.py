@@ -24,6 +24,7 @@ def main() -> None:
     parser.add_argument("--phrase-weight", type=float, default=1.6)
     parser.add_argument("--no-category", action="store_true")
     parser.add_argument("--no-fusion", action="store_true", help="use the pre-B3 additive scorer")
+    parser.add_argument("--no-hold", action="store_true", help="disable the low-evidence hold")
     parser.add_argument("--dense", action="store_true", help="enable the dense/FAISS ranker")
     parser.add_argument("--weights", default="", help='e.g. "dense=1.5,category=0.2"')
     args = parser.parse_args()
@@ -45,6 +46,7 @@ def main() -> None:
 
     import ANNA_dump.eval_agent as mod
     mod.Agent.ASK = None if args.ask_attribute == "none" else args.ask_attribute
+    mod.Agent.HOLD = not args.no_hold
     if args.no_category:
         # Ablation: disable category scoping by never recognising a label,
         # which drops the engine back to whole-catalog ranking.

@@ -281,3 +281,72 @@ perturbed number is the one that estimates the 800 private sessions.
 
 Remaining, unchanged priority order: P2 raise MRR (coordinate with Person C
 first), P3 finish B4 properly, P4 price hedge.
+
+--- Session 5: P2 (MRR) done, B-side only ---
+
+Scope check first. MRR splits cleanly and does NOT require Person C:
+  B side (mine): the ORDER of the candidate list handed over. Getting the target
+                 from rank 3 to rank 1 before any LLM sees it.
+  C side (C2):   LLM reordering of the top of that list.
+They compose. C cannot rescue what B never surfaced, and a better B list makes
+C's job easier. Deliberately did NOT build an LLM reranker: that is C2.
+
+Diagnosis before doing anything. Rank distribution at MRR 0.6727:
+    rank 1     106  (53.0%)
+    rank 2-3    50  (25.0%)   <- concentrated headroom
+    rank 4-10   41  (20.5%)
+    missed       3
+  Fixing only the 2-3 band would take MRR to 0.8135. Also noticed: sessions that
+  first hit on turn 1 had median rank 2, sessions hitting on turn 2+ had median
+  rank 1. More evidence means a sharper answer, so answering early is often
+  answering worse.
+
+THE LEVER: hold back a low-evidence first answer.
+  The metric maths rewards it. Answering a vague turn 1 and landing the target at
+  rank 2 ends the session at reciprocal rank 0.50. Asking once more and landing
+  rank 1 scores 1.00. The extra turn costs efficiency, but efficiency is weighted
+  0.2 against MRR's 0.3, so the trade is favourable. Confirmed empirically, not
+  assumed.
+
+  Evidence is counted in DISTINCT INFORMATIVE WORDS, not constraint segments.
+  Segment counts move with phrasing ("leather and 100% Leather" is one segment
+  conversationally, two tersely) and P1 exists precisely so behaviour does not
+  depend on wording. Word counts are stable across all three tested styles.
+  Segment-based gating also peaked lower (0.9021) and cost a hit; word-based
+  peaked higher and cost none.
+
+  Tuning, with a proper peak and degradation on both sides (not an edge effect):
+    words>=4  cap 3   technical 0.9092  <- chosen
+    words>=6  cap 3   technical 0.9060
+    words>=8  cap 3   technical 0.8992
+    words>=14 cap 4   technical 0.8810
+  Past the peak MRR plateaus around 0.86 but MTTC blows out and efficiency eats
+  the gain. cap=3 is a safety net: hit rate is weighted 0.5, so the agent must
+  never keep stalling for a better rank. Past turn 3 it answers with what it has.
+
+RESULT:
+                    before      after
+    hit_rate@10     0.9850     0.9850   (unchanged, no hits traded away)
+    mrr             0.6727     0.8362
+    mttc            2.205      2.710
+    efficiency      0.8795     0.8290
+    technical       0.8702     0.9092
+  by scenario: boundary 1.000/0.950 | browsing 0.988/0.825 | buying 0.988/0.827 |
+               intent_override 0.967/0.853   (hit/mrr)
+  Still phrasing-independent: clean 0.9092, natural 0.9045, terse 0.9096.
+
+HANDOVER, IMPORTANT (Person A, tasks A3 and A4):
+  The hold is deliberately shipped as a SIGNAL, not a policy. Retrieval exposes
+  SearchEngine.should_hold(session_id, turn) and evidence_words(session_id);
+  it does not decide anything on its own. Deciding when to ask instead of answer
+  IS A3 (over-generality detection) and A4 (proactive guidance), so A owns the
+  call and should feel free to replace the rule with something better. What B
+  contributes is the measurement that the behaviour is worth +0.039 technical
+  and +0.164 MRR, and the tuned thresholds to start from.
+  A's clarification prompts are what make this pay: the hold only helps if the
+  question asked actually extracts new constraints.
+
+Cumulative: 0.1067 -> 0.7959 -> 0.8569 -> 0.8732 -> 0.8702 (robust) -> 0.9092.
+
+TODO now: P3 finish B4 properly (memory trim, slot decay), P4 price hedge.
+P2 closed on the B side. Any further MRR work is C2 and should not be duplicated.
